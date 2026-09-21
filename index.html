@@ -1722,7 +1722,14 @@ async function savePersonDoc(){
     db.personDocs.push({id:uid(), ...data});
     logActivity('อัพโหลดเอกสาร', logLabel);
   }
-  saveDB();
+  saveDB(); // persists locally (IndexedDB/localStorage) immediately either way
+  // Wait for the actual Supabase sync before closing — see
+  // saveChecklistLog/submitLogModal for why the 800ms debounce alone isn't
+  // safe right after a photo upload.
+  const submitBtn2 = document.getElementById('personDocSubmitBtn');
+  if(submitBtn2){ submitBtn2.disabled = true; submitBtn2.textContent = 'กำลังบันทึกขึ้นเซิร์ฟเวอร์...'; }
+  await flushDBSyncNow();
+  if(submitBtn2){ submitBtn2.disabled = false; submitBtn2.textContent = 'บันทึก'; }
   editingPersonDocId = null;
   closeModal('personDocOverlay');
   render();
@@ -2589,23 +2596,36 @@ async function _runDBSync(){
     // This tab's `db` is whatever was in memory since page load (or the
     // last successful pull) — but db.dailyPhotos and db.kmLogs can also be
     // written concurrently by the LINE bot (drivers sending photos or
-    // texting "ไมล์ ...") at any time in between, via its own atomic RPCs.
-    // Since this call otherwise overwrites the ENTIRE app_state blob with
-    // this tab's copy, skipping this step would silently wipe out anything
-    // the bot added during that window — that's what was happening. Pull
-    // the latest photos/km right before sending and merge them in (union of
-    // both sides, nothing dropped either direction) so a stale tab can
-    // never erase newer bot-written data.
+    // texting "ไมล์ ...") at any time in between, via its own atomic RPCs,
+    // and every other array that can hold a photo/document — db.logs
+    // (checklist), db.oilLogs, db.tireLogs, db.shipments, db.personDocs, and
+    // db.vehicles[].photoUrl/lineDrivers — can just as easily be written
+    // concurrently by ANOTHER open tab or device (e.g. the mobile app) in
+    // between this tab's own saves. Since this call otherwise overwrites the
+    // ENTIRE app_state blob with this tab's copy, skipping this step would
+    // silently wipe out anything written elsewhere during that window —
+    // that's what was happening (this is the actual cause behind every
+    // "photo uploaded on one device never shows up on another" report).
+    // Pull the latest state right before sending and merge all of these
+    // fields in (arrays are unioned, single-value fields only fill a gap —
+    // see fillMissingFields below) so a stale tab can never erase newer
+    // data written from any other device or source.
     try{
       const { data: latest, error: pullErr } = await supabaseClient
         .rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
       if(!pullErr && latest){
         db.dailyPhotos = mergeDailyPhotosForSync(db.dailyPhotos, latest.dailyPhotos);
         db.kmLogs = mergeKmLogsForSync(db.kmLogs, latest.kmLogs);
-        db.vehicles = mergeLineDriversForSync(db.vehicles, latest.vehicles);
+        db.vehicles = mergeVehicleFieldsForSync(db.vehicles, latest.vehicles);
+        db.logs = mergeChecklistLogsForSync(db.logs, latest.logs);
+        db.oilLogs = mergeOilLogsForSync(db.oilLogs, latest.oilLogs);
+        db.tireLogs = mergeTireLogsForSync(db.tireLogs, latest.tireLogs);
+        db.shipments = mergeShipmentsForSync(db.shipments, latest.shipments);
+        db.personDocs = mergePersonDocsForSync(db.personDocs, latest.personDocs);
+        db.maintenanceLogs = mergeMaintenanceLogsForSync(db.maintenanceLogs, latest.maintenanceLogs);
       }
     }catch(mergeErr){
-      console.error('ดึงข้อมูลรูป/เลขไมล์/การลงทะเบียน LINE ล่าสุดก่อนซิงก์ไม่สำเร็จ (จะซิงก์ด้วยข้อมูลในเครื่องต่อไปโดยไม่รวมของใหม่จากบอท)', mergeErr);
+      console.error('ดึงข้อมูลรูป/เลขไมล์/เช็คสภาพ/การลงทะเบียน LINE ล่าสุดก่อนซิงก์ไม่สำเร็จ (จะซิงก์ด้วยข้อมูลในเครื่องต่อไปโดยไม่รวมของใหม่จากอุปกรณ์อื่น)', mergeErr);
     }
 
     const { error } = await supabaseClient
@@ -2749,7 +2769,16 @@ function mergeKmLogsForSync(localArr, remoteArr){
 // admin just removed, same problem removedImages solves for photos above.
 // NOTE: assumes each lineDrivers entry carries a `lineUserId` field — check
 // this matches what the line-webhook Edge Function actually writes.
-function mergeLineDriversForSync(localVehicles, remoteVehicles){
+// Also fills in a missing v.photoUrl (vehicle profile photo, set by
+// handleVehiclePhotoUpload) from the remote side — same overwrite risk as
+// lineDrivers: this tab may have loaded before the photo was uploaded from
+// another device, and photoUrl is a single value (not an array), so there's
+// no way to "union" it — the least-destructive rule is to only fill a gap
+// (local has none, remote has one), never overwrite a photoUrl this tab
+// already has, since there's no timestamp to say which one is newer.
+// Renamed from mergeLineDriversForSync to mergeVehicleFieldsForSync since it
+// now covers more than just lineDrivers.
+function mergeVehicleFieldsForSync(localVehicles, remoteVehicles){
   const remoteById = new Map((Array.isArray(remoteVehicles)?remoteVehicles:[]).map(v=>[v.id, v]));
   return (Array.isArray(localVehicles)?localVehicles:[]).map(lv=>{
     const rv = remoteById.get(lv.id);
@@ -2759,9 +2788,159 @@ function mergeLineDriversForSync(localVehicles, remoteVehicles){
     (lv.lineDrivers||[]).forEach(d=>{ if(d && d.lineUserId) byUser.set(d.lineUserId, d); });
     (rv.lineDrivers||[]).forEach(d=>{ if(d && d.lineUserId && !byUser.has(d.lineUserId)) byUser.set(d.lineUserId, d); });
     removedSet.forEach(id=> byUser.delete(id));
-    if(!byUser.size && !removedSet.size && !(lv.lineDrivers||[]).length && !(rv.lineDrivers||[]).length) return lv;
-    return {...lv, lineDrivers: Array.from(byUser.values()), lineDriversRemoved: Array.from(removedSet)};
+    const photoUrl = lv.photoUrl || rv.photoUrl || null;
+    if(!byUser.size && !removedSet.size && !(lv.lineDrivers||[]).length && !(rv.lineDrivers||[]).length && photoUrl===(lv.photoUrl||null)) return lv;
+    return {...lv, lineDrivers: Array.from(byUser.values()), lineDriversRemoved: Array.from(removedSet), photoUrl};
   });
+}
+
+// Union-merges db.logs (pretrip checklist entries: {id, vehicleId, date,
+// currentKm, items, failCount, notes, photos[], createdAt}) for the same
+// reason as the three functions above: a checklist saved from one device
+// (e.g. the mobile app, with a photo attached) only exists in this tab's
+// `db.logs` after this tab next pulls — a second tab/device left open since
+// before that checklist was saved still holds the shorter `logs` array, and
+// _runDBSync() otherwise pushes that stale copy over the ENTIRE app_state
+// blob on that tab's very next routine save, silently erasing the checklist
+// (and its photo) even though it had already synced successfully once. This
+// was the actual bug behind "photo uploads fine on mobile, never shows up on
+// web" reports.
+// Keyed by id — unlike the per-day buckets above, every checklist submission
+// gets its own uid(), so a record only present on one side is simply kept as
+// -is. For an id present on both sides (edited from two places), photos are
+// unioned so a photo can never be lost either direction; there's no per-
+// record edit timestamp to know which side's other fields (notes/items) are
+// newer, so those are taken from whichever side has the most photos, as a
+// proxy for "the more complete/most recent save" — the same kind of
+// approximation mergeKmLogsForSync makes for km above.
+function mergeChecklistLogsForSync(localArr, remoteArr){
+  const localSafe = Array.isArray(localArr) ? localArr : [];
+  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const remoteById = new Map(remoteSafe.map(l=>[l.id, l]));
+  const seen = new Set();
+  const merged = localSafe.map(l=>{
+    seen.add(l.id);
+    const r = remoteById.get(l.id);
+    if(!r) return l; // only exists locally so far (not yet synced elsewhere, or added here)
+    const photos = Array.from(new Set([...(l.photos||[]), ...(r.photos||[])]));
+    const base = (r.photos||[]).length > (l.photos||[]).length ? r : l;
+    return {...base, photos};
+  });
+  for(const r of remoteSafe){
+    if(!seen.has(r.id)) merged.push(r); // exists only on the remote side (e.g. saved from another device)
+  }
+  return merged;
+}
+
+// Shared helper for the four merge functions below (oilLogs, tireLogs,
+// shipments, personDocs): given a local and a remote record believed to be
+// "the same" record, fill in any field that's missing/empty locally with the
+// remote's value — e.g. a receiptImage or fileImage uploaded from another
+// device that this tab doesn't have yet. Never overwrites a value this tab
+// already has (no per-field timestamp exists to say which is newer, so the
+// least-destructive rule is applied: don't erase, but don't leave a
+// genuinely missing value blank either). arrayFields lists which keys should
+// be unioned (never lose an item either side) instead of gap-filled.
+function fillMissingFields(local, remote, arrayFields=[]){
+  const out = {...local};
+  for(const key of Object.keys(remote||{})){
+    if(arrayFields.includes(key)){
+      out[key] = Array.from(new Set([...(local[key]||[]), ...(remote[key]||[])]));
+    }else if((out[key]===undefined || out[key]===null || out[key]==='') && remote[key]!=null && remote[key]!==''){
+      out[key] = remote[key];
+    }
+  }
+  return out;
+}
+
+// db.oilLogs ({id, vehicleId, date, km, cost, bookNo, billNo, receiptImage})
+// — submitLogModal deletes any existing entry for the same vehicleId+date
+// before pushing a new one (only one oil-change record per vehicle per day),
+// so — unlike tireLogs/shipments/personDocs below — this is keyed by
+// vehicleId+date the same way mergeDailyPhotosForSync/mergeKmLogsForSync are,
+// not by id.
+function mergeOilLogsForSync(localArr, remoteArr){
+  const localSafe = Array.isArray(localArr) ? localArr : [];
+  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const byKey = new Map(localSafe.map(e=>[e.vehicleId+'|'+e.date, e]));
+  for(const r of remoteSafe){
+    const key = r.vehicleId+'|'+r.date;
+    const existing = byKey.get(key);
+    byKey.set(key, existing ? fillMissingFields(existing, r) : r);
+  }
+  return Array.from(byKey.values());
+}
+
+// db.tireLogs ({id, vehicleId, date, km, count, cost, note, positions[],
+// receiptImage}) — each entry keeps its own stable id for its whole life
+// (see submitTireLogModal), so union by id like mergeChecklistLogsForSync,
+// filling any missing fields (esp. receiptImage) from whichever side has
+// them for a record present on both sides.
+function mergeTireLogsForSync(localArr, remoteArr){
+  const localSafe = Array.isArray(localArr) ? localArr : [];
+  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const remoteById = new Map(remoteSafe.map(l=>[l.id, l]));
+  const seen = new Set();
+  const merged = localSafe.map(l=>{
+    seen.add(l.id);
+    const r = remoteById.get(l.id);
+    return r ? fillMissingFields(l, r) : l;
+  });
+  for(const r of remoteSafe){ if(!seen.has(r.id)) merged.push(r); }
+  return merged;
+}
+
+// db.shipments ({id, shipmentNo, date, vehicleId, ..., photos[]}) — each
+// shipment keeps its own stable id, so union by id; photos[] is unioned
+// (never lose a photo either side), everything else just fills gaps.
+function mergeShipmentsForSync(localArr, remoteArr){
+  const localSafe = Array.isArray(localArr) ? localArr : [];
+  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const remoteById = new Map(remoteSafe.map(s=>[s.id, s]));
+  const seen = new Set();
+  const merged = localSafe.map(s=>{
+    seen.add(s.id);
+    const r = remoteById.get(s.id);
+    return r ? fillMissingFields(s, r, ['photos']) : s;
+  });
+  for(const r of remoteSafe){ if(!seen.has(r.id)) merged.push(r); }
+  return merged;
+}
+
+// db.personDocs ({id, personId, docType, detail, issueDate, expiryDate,
+// notes, fileImage}) — each document keeps its own stable id, so union by
+// id, filling in a missing fileImage (or any other blank field) from
+// whichever side has it.
+function mergePersonDocsForSync(localArr, remoteArr){
+  const localSafe = Array.isArray(localArr) ? localArr : [];
+  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const remoteById = new Map(remoteSafe.map(d=>[d.id, d]));
+  const seen = new Set();
+  const merged = localSafe.map(d=>{
+    seen.add(d.id);
+    const r = remoteById.get(d.id);
+    return r ? fillMissingFields(d, r) : d;
+  });
+  for(const r of remoteSafe){ if(!seen.has(r.id)) merged.push(r); }
+  return merged;
+}
+
+// db.maintenanceLogs ({id, vehicleId, title, date, km, cost, note,
+// receiptImage}) — "other maintenance records (tires, battery, anything
+// else)" — each entry keeps its own stable id like tireLogs above, so the
+// same id-keyed union + fillMissingFields treatment applies.
+function mergeMaintenanceLogsForSync(localArr, remoteArr){
+  const localSafe = Array.isArray(localArr) ? localArr : [];
+  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const remoteById = new Map(remoteSafe.map(l=>[l.id, l]));
+  const seen = new Set();
+  const merged = localSafe.map(l=>{
+    seen.add(l.id);
+    const r = remoteById.get(l.id);
+    return r ? fillMissingFields(l, r) : l;
+  });
+  for(const r of remoteSafe){ if(!seen.has(r.id)) merged.push(r); }
+  return merged;
 }
 
 /* One-time cleanup for data saved before uploadImageToStorage() existed.
@@ -3121,7 +3300,7 @@ function clearVehicleLineDrivers(){
   const v = db.vehicles.find(v=>v.id===editingVehicleId);
   if(!v || !v.lineDrivers || !v.lineDrivers.length) return;
   if(!confirm('ล้างการผูกบัญชี LINE ทั้งหมดของรถคันนี้? คนขับจะต้องพิมพ์ "ลงทะเบียน" ใหม่เพื่อส่งรูปอัตโนมัติอีกครั้ง')) return;
-  // Record removed lineUserIds as tombstones (see mergeLineDriversForSync)
+  // Record removed lineUserIds as tombstones (see mergeVehicleFieldsForSync)
   // so the next sync's union-merge doesn't silently bring these back.
   const removedIds = v.lineDrivers.map(d=>d && d.lineUserId).filter(Boolean);
   v.lineDriversRemoved = Array.from(new Set([...(v.lineDriversRemoved||[]), ...removedIds]));
@@ -3663,10 +3842,15 @@ async function handleVehiclePhotoUpload(event, vehicleId){
   input.disabled = true;
   try{
     v.photoUrl = await uploadImageToStorage(file, 640, 0.75);
-    saveDB();
+    saveDB(); // persists locally (IndexedDB/localStorage) immediately either way
+    // Wait for the actual Supabase sync — see saveChecklistLog/submitLogModal
+    // for why relying on the 800ms debounce alone lost photos taken right
+    // before the user navigated away.
+    await flushDBSyncNow();
   }catch(e){
     alert('ไม่สามารถอัปโหลดรูปรถได้ กรุณาลองใหม่');
   }
+  input.disabled = false;
   render();
 }
 
@@ -4428,7 +4612,7 @@ function deleteChecklistLog(logId){
   render();
 }
 
-function saveChecklistLog(){
+async function saveChecklistLog(){
   const v = db.vehicles.find(v=>v.id===currentVehicleId);
   if(!v) return;
   const items = {...checklistState};
@@ -4458,7 +4642,15 @@ function saveChecklistLog(){
     logActivity('เพิ่มบันทึกตรวจสภาพ', `${v.name}${failCount ? ` — พบจุดผิดปกติ ${failCount} รายการ` : ''} (${date})`);
   }
 
-  saveDB();
+  saveDB(); // persists locally (IndexedDB/localStorage) immediately either way
+  // Wait for the actual Supabase sync before closing — closing right away and
+  // relying on the 800ms debounce is what let a checklist photo taken right
+  // before tapping save silently never make it to the server (see submitLogModal
+  // above, which was fixed the same way for the oil/tire receipt photo).
+  const saveBtn = document.getElementById('checklistSaveBtn');
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'กำลังบันทึกขึ้นเซิร์ฟเวอร์...'; }
+  await flushDBSyncNow();
+  if(saveBtn){ saveBtn.disabled = false; }
   checklistEditId = null;
   checklistState = {};
   checklistNotes = '';
@@ -4747,7 +4939,7 @@ function renderChecklistPanel(){
         </label>
       </div>
     </div>
-    <button class="btn" style="width:100%;" onclick="saveChecklistLog()">${checklistEditId ? 'บันทึกการแก้ไข' : 'บันทึกผลตรวจวันนี้'}</button>
+    <button class="btn" id="checklistSaveBtn" style="width:100%;" onclick="saveChecklistLog()">${checklistEditId ? 'บันทึกการแก้ไข' : 'บันทึกผลตรวจวันนี้'}</button>
   `;
 }
 
@@ -4829,7 +5021,14 @@ async function submitMaintenanceLogModal(){
   const vName = (db.vehicles.find(v=>v.id===vehicleId)||{}).name || vehicleId;
   logActivity(wasEditing ? 'แก้ไขบันทึกซ่อมบำรุง' : 'เพิ่มบันทึกซ่อมบำรุง', `${vName} — ${title}`);
 
-  saveDB();
+  saveDB(); // persists locally (IndexedDB/localStorage) immediately either way
+  // Wait for the actual Supabase sync before closing — see
+  // saveChecklistLog/submitLogModal for why the 800ms debounce alone isn't
+  // safe right after a photo upload.
+  const submitBtn2 = document.getElementById('maintLogSubmitBtn');
+  if(submitBtn2){ submitBtn2.disabled = true; submitBtn2.textContent = 'กำลังบันทึกขึ้นเซิร์ฟเวอร์...'; }
+  await flushDBSyncNow();
+  if(submitBtn2){ submitBtn2.disabled = false; submitBtn2.textContent = 'บันทึก'; }
   maintLogEditId = null;
   closeModal('maintLogOverlay');
   render();
@@ -5673,7 +5872,7 @@ function openShipmentModal(shipmentId=null, vehicleIdHint=null){
   document.getElementById('shipmentOverlay').classList.add('show');
 }
 
-function saveShipment(){
+async function saveShipment(){
   const shipmentNo = document.getElementById('shipmentNo').value.trim();
   const date = document.getElementById('shipmentDate').value;
   const vehicleId = document.getElementById('shipmentVehicle').value;
@@ -5709,7 +5908,14 @@ function saveShipment(){
     db.shipments.push(entry);
     logActivity('เพิ่มบันทึกการส่งสินค้า', shipmentNo || entry.id);
   }
-  saveDB();
+  saveDB(); // persists locally (IndexedDB/localStorage) immediately either way
+  // Wait for the actual Supabase sync before closing — see
+  // saveChecklistLog/submitLogModal for why the 800ms debounce alone isn't
+  // safe right after a photo upload.
+  const submitBtn = document.getElementById('shipmentSubmitBtn');
+  if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'กำลังบันทึกขึ้นเซิร์ฟเวอร์...'; }
+  await flushDBSyncNow();
+  if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'บันทึก'; }
   shipmentEditId = null;
   closeModal('shipmentOverlay');
   render();
@@ -6437,7 +6643,14 @@ async function submitTireLogModal(){
 
   const isNewEntry = !tireLogEditId;
   logActivity(tireLogEditId ? 'แก้ไขบันทึกเปลี่ยนยาง' : 'เพิ่มบันทึกเปลี่ยนยาง', (db.vehicles.find(v=>v.id===vehicleId)||{}).name || vehicleId);
-  saveDB();
+  saveDB(); // persists locally (IndexedDB/localStorage) immediately either way
+  // Wait for the actual Supabase sync before closing — see
+  // saveChecklistLog/submitLogModal for why the 800ms debounce alone isn't
+  // safe right after a photo upload.
+  const submitBtn = document.getElementById('tireLogSubmitBtn');
+  if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'กำลังบันทึกขึ้นเซิร์ฟเวอร์...'; }
+  await flushDBSyncNow();
+  if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'บันทึก'; }
   tireLogEditId = null;
   closeModal('tireLogOverlay');
   renderTiresView();

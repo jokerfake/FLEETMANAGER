@@ -749,6 +749,83 @@
     box-shadow:inset 0 0 0 2px rgba(255,255,255,0.35);
   }
 
+  /* ---------- Vehicle picker (grouped by fleet) ---------- */
+  :root{ --vp-ring:0 0 0 4px var(--accent-soft); --vp-shadow:0 24px 48px -12px rgba(16,24,40,0.22); }
+  .veh-picker{ position:relative; min-width:0; }
+  .veh-picker-btn{
+    display:flex; align-items:center; gap:10px; min-width:320px; max-width:460px;
+    background:var(--panel); color:var(--paper); border:1px solid var(--steel); border-radius:12px;
+    padding:7px 12px 7px 12px; cursor:pointer; text-align:left; box-shadow:var(--shadow-sm);
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .veh-picker-btn:hover{ border-color:color-mix(in srgb,var(--accent) 40%, var(--steel)); }
+  .veh-picker.open .veh-picker-btn{ border-color:var(--accent); box-shadow:var(--vp-ring); }
+  .vp-btn-main{ display:flex; flex-direction:column; min-width:0; flex:1; line-height:1.25; }
+  .vp-btn-name{ font-family:'Kanit'; font-weight:600; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .vp-btn-sub{ font-size:11.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .vp-btn-count{ font-size:11px; color:var(--muted); background:var(--panel-2); border:1px solid var(--steel); padding:2px 8px; border-radius:999px; white-space:nowrap; }
+  .vp-caret{ color:var(--muted); font-size:12px; transition:transform .15s; }
+  .veh-picker.open .vp-caret{ transform:rotate(180deg); }
+  .vp-dot{ width:9px; height:9px; border-radius:50%; flex-shrink:0; display:inline-block; background:var(--ok); box-shadow:0 0 0 3px var(--ok-bg); }
+  .vp-dot.active{ background:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  .vp-dot.repair{ background:var(--overdue); box-shadow:0 0 0 3px var(--overdue-bg); }
+  .veh-picker-panel{
+    display:none; position:absolute; top:calc(100% + 8px); left:0; z-index:60;
+    width:min(620px, calc(100vw - 32px)); max-height:min(72vh, 640px);
+    background:var(--panel); border:1px solid var(--steel); border-radius:16px; box-shadow:var(--vp-shadow);
+    flex-direction:column; overflow:hidden;
+  }
+  .veh-picker.open .veh-picker-panel{ display:flex; animation:modalIn .14s ease-out; }
+  .vp-search-row{ padding:12px 12px 6px; }
+  .vp-search-row input{ width:100%; border:1px solid var(--steel); background:var(--panel-2); color:var(--paper); border-radius:10px; padding:10px 12px; font-size:14.5px; }
+  .vp-chips{ display:flex; gap:6px; padding:4px 12px; overflow-x:auto; scrollbar-width:none; flex-shrink:0; }
+  .vp-chips::-webkit-scrollbar{ display:none; }
+  .vp-chip{ display:inline-flex; align-items:center; gap:6px; white-space:nowrap; cursor:pointer;
+    border:1px solid var(--steel); background:var(--panel); color:var(--paper); border-radius:999px; padding:6px 12px; font-size:13px; font-family:'Kanit'; font-weight:500; transition:all .12s; }
+  .vp-chip b{ font-family:'JetBrains Mono'; font-size:11px; font-weight:700; color:var(--muted); background:var(--panel-2); border-radius:999px; padding:1px 7px; }
+  .vp-chip:hover{ border-color:var(--accent); }
+  .vp-chip.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  .vp-chip.active b{ background:rgba(255,255,255,.22); color:#fff; }
+  .vp-chip.sm{ padding:4px 10px; font-size:12px; }
+  .vp-status-chips{ padding-bottom:10px; border-bottom:1px solid var(--steel-soft); }
+  .vp-list{ overflow-y:auto; padding:6px 8px 8px; flex:1; }
+  .vp-group-h{ position:sticky; top:-6px; z-index:1; display:flex; justify-content:space-between; align-items:center;
+    font-family:'Kanit'; font-size:12px; font-weight:600; color:var(--accent-2); text-transform:uppercase; letter-spacing:.04em;
+    background:color-mix(in srgb,var(--panel) 92%, transparent); backdrop-filter:blur(6px); padding:10px 8px 6px; }
+  .vp-group-h span{ color:var(--muted); font-weight:500; }
+  .vp-item{ display:flex; align-items:center; gap:12px; padding:9px 10px; border-radius:10px; cursor:pointer; }
+  .vp-item.hi{ background:var(--panel-2); }
+  .vp-item.current{ background:var(--accent-soft); }
+  .vp-item.current .vp-item-name::after{ content:' ✓'; color:var(--accent); }
+  .vp-item-main{ display:flex; flex-direction:column; min-width:0; flex:1; }
+  .vp-item-name{ font-family:'JetBrains Mono'; font-weight:700; font-size:13.5px; }
+  .vp-item-sub{ font-size:12.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .vp-item-meta{ font-size:11.5px; color:var(--muted); white-space:nowrap; text-align:right; }
+  .vp-warn{ color:var(--soon-text); font-weight:600; }
+  .vp-empty{ padding:30px; text-align:center; color:var(--muted); }
+  .vp-footer{ display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 12px; border-top:1px solid var(--steel-soft); font-size:12px; color:var(--muted); background:var(--panel-2); }
+  @media (max-width:700px){
+    .veh-picker{ width:100%; }
+    .veh-picker-btn{ min-width:0; max-width:none; width:100%; }
+    .veh-picker-panel{ position:fixed; left:16px; right:16px; top:70px; width:auto; max-height:calc(100vh - 100px); }
+    .vp-item-meta{ display:none; }
+    .main-topbar{ padding:10px 16px; }
+    .wrap{ padding:0 16px; }
+  }
+
+  /* Bulk fleet assign */
+  .fg-assign-tools{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+  .fg-assign-tools input{ flex:1; min-width:140px; width:auto !important; }
+  .fg-assign-tools select{ min-width:140px; width:auto !important; }
+  .fg-assign-list{ max-height:280px; overflow-y:auto; border:1px solid var(--steel); border-radius:12px; padding:4px; }
+  .fg-assign-row{ display:flex; align-items:center; gap:10px; padding:7px 8px; border-radius:8px; cursor:pointer; font-size:13.5px; }
+  .fg-assign-row:hover{ background:var(--panel-2); }
+  .fg-assign-row input{ width:auto !important; }
+  .fg-assign-name{ flex:1; min-width:0; font-family:'JetBrains Mono'; font-weight:600; }
+  .fg-assign-name small{ font-family:'Sarabun',sans-serif; font-weight:400; color:var(--muted); margin-left:6px; }
+  .fg-assign-group{ font-size:11.5px; padding:2px 9px; border-radius:999px; background:var(--accent-soft); color:var(--accent-2); white-space:nowrap; }
+  .fg-assign-group.none{ background:var(--steel-soft); color:var(--muted); }
+
   /* ---------------- Print stylesheet ---------------- */
   @media print{
     :root{
@@ -760,7 +837,7 @@
     body{ background:#fff !important; padding-bottom:0; }
     .km-row .btn, .km-row span{ display:none !important; }
     .btn, .chk-toggle, .modal-actions, .overlay, .fleet-select{ display:none !important; }
-    .sidebar, .main-topbar{ display:none !important; }
+    .sidebar, .main-topbar, .veh-picker{ display:none !important; }
     .app-shell{ display:block !important; }
     .task-actions, .pm-actions, .veh-photo-edit, .fleet-tab-bar, .veh-hero-actions{ display:none !important; }
     .oil-banner{ animation:none; border-width:2px; }
@@ -818,7 +895,19 @@
 
   <div class="main-area">
     <div class="main-topbar">
-      <select id="vehicleSelect" onchange="onVehicleChange()"></select>
+      <select id="vehicleSelect" onchange="onVehicleChange()" style="display:none;" aria-hidden="true"></select>
+      <div class="veh-picker" id="vehPicker">
+        <button type="button" class="veh-picker-btn" id="vehPickerBtn" onclick="toggleVehPicker()" aria-haspopup="listbox" aria-expanded="false"></button>
+        <div class="veh-picker-panel" id="vehPickerPanel" role="dialog">
+          <div class="vp-search-row">
+            <input type="text" id="vpSearch" placeholder="🔍 ค้นหาทะเบียน / คนขับ" autocomplete="off" oninput="onVpSearch(this.value)" onkeydown="onVpKey(event)">
+          </div>
+          <div class="vp-chips" id="vpFleetChips"></div>
+          <div class="vp-chips vp-status-chips" id="vpStatusChips"></div>
+          <div class="vp-list" id="vpList" role="listbox"></div>
+          <div class="vp-footer" id="vpFooter"></div>
+        </div>
+      </div>
       <button class="btn ghost small" id="addVehicleBtn" style="display:none;" onclick="openVehicleModal()">+ เพิ่มรถ</button>
       <button class="btn ghost small" id="editVehicleBtn" style="display:none;" onclick="openVehicleModal(currentVehicleId)">แก้ไขชื่อรถ</button>
       <button class="btn ghost small" id="deleteVehicleBtn" style="display:none;" onclick="deleteVehicle()">ลบรถคันนี้</button>
@@ -997,15 +1086,24 @@
 
 <!-- Fleet Group Management Modal -->
 <div class="overlay" id="fleetGroupOverlay">
-  <div class="modal">
+  <div class="modal" style="max-width:600px;">
     <h3>จัดการกลุ่มรถ (Fleet)</h3>
     <div id="fleetGroupList"></div>
     <div class="field" style="margin-top:14px;">
       <label>เพิ่มกลุ่มใหม่</label>
       <div style="display:flex; gap:8px;">
-        <input id="newFleetGroupName" placeholder="เช่น สายเหนือ, รถบรรทุกหนัก" style="flex:1;">
+        <input id="newFleetGroupName" placeholder="เช่น สายเหนือ, รถบรรทุกหนัก" style="flex:1;" onkeydown="if(event.key==='Enter') addFleetGroup();">
         <button class="btn small" onclick="addFleetGroup()">เพิ่ม</button>
       </div>
+    </div>
+    <div class="field" style="margin-top:18px;">
+      <label>กำหนดกลุ่มให้รถแต่ละคัน (เลือกได้ทีละหลายคัน)</label>
+      <div class="fg-assign-tools">
+        <input id="fgAssignSearch" placeholder="🔍 กรองทะเบียน/คนขับ" oninput="renderFleetAssignList()">
+        <select id="fgAssignTarget"></select>
+        <button class="btn small" onclick="bulkAssignFleetGroup()">ย้ายคันที่เลือก</button>
+      </div>
+      <div id="fleetAssignList" class="fg-assign-list"></div>
     </div>
     <div class="modal-actions">
       <button class="btn ghost" onclick="closeModal('fleetGroupOverlay')">ปิด</button>
@@ -2301,7 +2399,7 @@ function clearActivityLog(){
 const ACTIVITY_CATEGORY_MAP = {
   'เข้าสู่ระบบ':'auth', 'ออกจากระบบ':'auth',
   'เพิ่มรถ':'vehicles', 'แก้ไขรถ':'vehicles', 'ลบรถ':'vehicles',
-  'เพิ่มกลุ่มรถ':'vehicles', 'แก้ไขชื่อกลุ่มรถ':'vehicles', 'ลบกลุ่มรถ':'vehicles',
+  'เพิ่มกลุ่มรถ':'vehicles', 'แก้ไขชื่อกลุ่มรถ':'vehicles', 'ย้ายกลุ่มรถ':'vehicles', 'ลบกลุ่มรถ':'vehicles',
   'เพิ่มบันทึกเลขไมล์':'daily', 'แก้ไขบันทึกเลขไมล์':'daily', 'ลบบันทึกเลขไมล์':'daily',
   'เพิ่มบันทึกเปลี่ยนน้ำมันเครื่อง':'daily', 'แก้ไขบันทึกเปลี่ยนน้ำมันเครื่อง':'daily',
   'เพิ่มบันทึกตรวจสภาพ':'daily', 'แก้ไขบันทึกตรวจสภาพ':'daily', 'ลบบันทึกตรวจสภาพ':'daily',
@@ -3161,7 +3259,8 @@ function openFleetGroupModal(){
 function renderFleetGroupList(){
   const container = document.getElementById('fleetGroupList');
   if(!container) return;
-  if(!db.fleetGroups.length){ container.innerHTML = '<div class="hint">ยังไม่มีกลุ่มรถ</div>'; return; }
+  renderFleetAssignList();
+  if(!db.fleetGroups.length){ container.innerHTML = '<div class="hint">ยังไม่มีกลุ่มรถ — เพิ่มกลุ่มด้านล่าง แล้วติ๊กเลือกรถเพื่อย้ายเข้ากลุ่ม</div>'; return; }
   container.innerHTML = db.fleetGroups.map(g=>{
     const count = db.vehicles.filter(v=>v.fleetGroupId===g.id).length;
     return `
@@ -4467,13 +4566,194 @@ function saveChecklistLog(){
   render();
 }
 
+/* ---------------- Vehicle picker (grouped by fleet) ----------------
+   Replaces the long native <select>: a searchable popover with fleet-group
+   chips + status chips, list grouped under fleet headers. The hidden
+   #vehicleSelect is kept in sync so onVehicleChange() works unchanged. */
+let vpQuery = '';
+let vpStatus = 'all';
+let vpFleet = 'all';
+let vpActiveIdx = 0;
+try{ vpFleet = localStorage.getItem('truckMaint.vpFleet') || 'all'; }catch(err){}
+
+function vpGroupName(gid){
+  if(!gid) return 'ไม่ระบุกลุ่ม';
+  const g = db.fleetGroups.find(g=>g.id===gid);
+  return g ? g.name : 'ไม่ระบุกลุ่ม';
+}
+function vpFilteredVehicles(){
+  const q = vpQuery.trim().toLowerCase();
+  return db.vehicles.filter(v=>{
+    if(vpFleet !== 'all' && (v.fleetGroupId || 'none') !== vpFleet) return false;
+    if(vpStatus !== 'all' && (v.status || 'ready') !== vpStatus) return false;
+    if(!q) return true;
+    return `${v.name} ${v.driver||''} ${vpGroupName(v.fleetGroupId)}`.toLowerCase().includes(q);
+  });
+}
+function renderVehPicker(){
+  const btn = document.getElementById('vehPickerBtn');
+  if(!btn) return;
+  const cur = db.vehicles.find(v=>v.id===currentVehicleId);
+  if(!db.vehicles.length){
+    btn.innerHTML = `<span class="vp-btn-main"><span class="vp-btn-name">ยังไม่มีรถในระบบ</span></span>`;
+  }else if(cur){
+    const st = cur.status || 'ready';
+    btn.innerHTML = `
+      <span class="vp-dot ${st}"></span>
+      <span class="vp-btn-main">
+        <span class="vp-btn-name">${escapeHtml(cur.name)}</span>
+        <span class="vp-btn-sub">${cur.driver ? escapeHtml(cur.driver) + ' · ' : ''}${escapeHtml(vpGroupName(cur.fleetGroupId))}</span>
+      </span>
+      <span class="vp-btn-count">${db.vehicles.length} คัน</span>
+      <span class="vp-caret">▾</span>`;
+  }else{
+    btn.innerHTML = `<span class="vp-btn-main"><span class="vp-btn-name">เลือกรถ</span></span><span class="vp-caret">▾</span>`;
+  }
+  if(document.getElementById('vehPicker').classList.contains('open')) renderVehPickerPanel();
+}
+function renderVehPickerPanel(){
+  // Fleet chips
+  const hasUngrouped = db.vehicles.some(v=>!v.fleetGroupId);
+  const fleets = [
+    {id:'all', name:'ทุกฟลีท', n: db.vehicles.length},
+    ...db.fleetGroups.map(g=>({id:g.id, name:g.name, n: db.vehicles.filter(v=>v.fleetGroupId===g.id).length})),
+    ...(hasUngrouped && db.fleetGroups.length ? [{id:'none', name:'ไม่ระบุกลุ่ม', n: db.vehicles.filter(v=>!v.fleetGroupId).length}] : [])
+  ];
+  if(!fleets.some(f=>f.id===vpFleet)) vpFleet = 'all';
+  document.getElementById('vpFleetChips').innerHTML = fleets.map(f=>
+    `<button type="button" class="vp-chip ${vpFleet===f.id?'active':''}" onclick="setVpFleet('${f.id}')">${escapeHtml(f.name)} <b>${f.n}</b></button>`
+  ).join('');
+  // Status chips
+  const statuses = [{id:'all', name:'ทุกสถานะ'}, ...Object.keys(FLEET_STATUS).map(k=>({id:k, name:FLEET_STATUS[k].label}))];
+  document.getElementById('vpStatusChips').innerHTML = statuses.map(st=>{
+    const n = st.id==='all' ? '' : ` <b>${db.vehicles.filter(v=>(v.status||'ready')===st.id).length}</b>`;
+    return `<button type="button" class="vp-chip sm ${vpStatus===st.id?'active':''}" onclick="setVpStatus('${st.id}')">${st.id!=='all'?`<span class="vp-dot ${st.id}"></span>`:''}${st.name}${n}</button>`;
+  }).join('');
+
+  // List grouped by fleet
+  const list = vpFilteredVehicles();
+  if(vpActiveIdx >= list.length) vpActiveIdx = Math.max(0, list.length-1);
+  const groups = [];
+  const order = [...db.fleetGroups.map(g=>g.id), null];
+  order.forEach(gid=>{
+    const items = list.filter(v=>(v.fleetGroupId||null)===gid || (gid===null && v.fleetGroupId && !db.fleetGroups.some(g=>g.id===v.fleetGroupId)));
+    if(items.length) groups.push({gid, items});
+  });
+  let idx = 0;
+  const showHeaders = db.fleetGroups.length > 0;
+  const html = groups.map(gr=>`
+    ${showHeaders ? `<div class="vp-group-h">${escapeHtml(vpGroupName(gr.gid))}<span>${gr.items.length}</span></div>` : ''}
+    ${gr.items.map(v=>{
+      const i = idx++;
+      const st = v.status || 'ready';
+      const insp = lastInspectionLabel(v.id);
+      return `<div class="vp-item ${v.id===currentVehicleId?'current':''} ${i===vpActiveIdx?'hi':''}" role="option" data-idx="${i}" onclick="pickVehicle('${v.id}')" onmouseenter="vpActiveIdx=${i}">
+        <span class="vp-dot ${st}" title="${FLEET_STATUS[st].label}"></span>
+        <span class="vp-item-main">
+          <span class="vp-item-name">${escapeHtml(v.name)}</span>
+          <span class="vp-item-sub">${v.driver ? escapeHtml(v.driver) : '<i>ไม่ระบุคนขับ</i>'}</span>
+        </span>
+        <span class="vp-item-meta">${insp ? escapeHtml(insp) : '<span class="vp-warn">ยังไม่เคยตรวจ</span>'}</span>
+      </div>`;
+    }).join('')}`).join('');
+  const listEl = document.getElementById('vpList');
+  listEl.innerHTML = html || `<div class="vp-empty">ไม่พบรถที่ตรงกับเงื่อนไข</div>`;
+  listEl._ids = list.map(v=>v.id); // flat order matches data-idx
+  // Footer
+  document.getElementById('vpFooter').innerHTML = `
+    <span>แสดง ${list.length} / ${db.vehicles.length} คัน</span>
+    ${can('vehicles') ? `<button type="button" class="btn ghost small" onclick="closeVehPicker(); openFleetGroupModal()">🗂️ จัดการกลุ่มรถ</button>` : ''}`;
+}
+function toggleVehPicker(){
+  const p = document.getElementById('vehPicker');
+  if(p.classList.contains('open')){ closeVehPicker(); return; }
+  if(!db.vehicles.length){ if(can('vehicles')) openVehicleModal(); return; }
+  p.classList.add('open');
+  document.getElementById('vehPickerBtn').setAttribute('aria-expanded','true');
+  vpQuery = ''; vpActiveIdx = 0;
+  const s = document.getElementById('vpSearch'); s.value = '';
+  renderVehPickerPanel();
+  const cur = document.querySelector('#vpList .vp-item.current');
+  if(cur) cur.scrollIntoView({block:'center'});
+  setTimeout(()=>s.focus(), 30);
+}
+function closeVehPicker(){
+  const p = document.getElementById('vehPicker');
+  if(!p) return;
+  p.classList.remove('open');
+  document.getElementById('vehPickerBtn').setAttribute('aria-expanded','false');
+}
+function setVpFleet(id){
+  vpFleet = id; vpActiveIdx = 0;
+  try{ localStorage.setItem('truckMaint.vpFleet', id); }catch(err){}
+  renderVehPickerPanel();
+}
+function setVpStatus(id){ vpStatus = id; vpActiveIdx = 0; renderVehPickerPanel(); }
+function onVpSearch(val){ vpQuery = val; vpActiveIdx = 0; renderVehPickerPanel(); }
+function onVpKey(e){
+  const ids = document.getElementById('vpList')._ids || [];
+  if(e.key === 'Escape'){ closeVehPicker(); document.getElementById('vehPickerBtn').focus(); return; }
+  if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    e.preventDefault();
+    if(!ids.length) return;
+    vpActiveIdx = (vpActiveIdx + (e.key==='ArrowDown'?1:-1) + ids.length) % ids.length;
+    document.querySelectorAll('#vpList .vp-item').forEach(el=>el.classList.toggle('hi', +el.dataset.idx===vpActiveIdx));
+    const hi = document.querySelector('#vpList .vp-item.hi'); if(hi) hi.scrollIntoView({block:'nearest'});
+    return;
+  }
+  if(e.key === 'Enter' && ids[vpActiveIdx]){ e.preventDefault(); pickVehicle(ids[vpActiveIdx]); }
+}
+function pickVehicle(id){
+  closeVehPicker();
+  const sel = document.getElementById('vehicleSelect');
+  sel.value = id;
+  onVehicleChange();
+  // Picking a vehicle from a fleet-wide screen jumps to that vehicle's dashboard
+  if(currentView !== 'dashboard') setView('dashboard');
+}
+document.addEventListener('mousedown', e=>{
+  const p = document.getElementById('vehPicker');
+  if(p && p.classList.contains('open') && !p.contains(e.target)) closeVehPicker();
+});
+
+/* Bulk fleet assignment (inside จัดการกลุ่มรถ modal) */
+function renderFleetAssignList(){
+  const wrap = document.getElementById('fleetAssignList');
+  if(!wrap) return;
+  const target = document.getElementById('fgAssignTarget');
+  const prevTarget = target.options.length ? target.value : null;
+  target.innerHTML = db.fleetGroups.map(g=>`<option value="${g.id}">→ ${escapeHtml(g.name)}</option>`).join('') + '<option value="">→ ไม่ระบุกลุ่ม</option>';
+  if(prevTarget !== null && [...target.options].some(o=>o.value===prevTarget)) target.value = prevTarget;
+  const q = (document.getElementById('fgAssignSearch').value || '').trim().toLowerCase();
+  const checked = new Set([...wrap.querySelectorAll('input[type=checkbox]:checked')].map(c=>c.value));
+  const vs = db.vehicles.filter(v=>!q || `${v.name} ${v.driver||''}`.toLowerCase().includes(q));
+  wrap.innerHTML = vs.length ? vs.map(v=>`
+    <label class="fg-assign-row">
+      <input type="checkbox" value="${v.id}" ${checked.has(v.id)?'checked':''}>
+      <span class="fg-assign-name">${escapeHtml(v.name)} <small>${v.driver?escapeHtml(v.driver):''}</small></span>
+      <span class="fg-assign-group ${v.fleetGroupId?'':'none'}">${escapeHtml(vpGroupName(v.fleetGroupId))}</span>
+    </label>`).join('') : '<div class="hint" style="padding:8px;">ไม่พบรถ</div>';
+}
+function bulkAssignFleetGroup(){
+  if(!can('vehicles')){ alert('คุณไม่มีสิทธิ์จัดการรถ/ทะเบียน'); return; }
+  const ids = [...document.querySelectorAll('#fleetAssignList input[type=checkbox]:checked')].map(c=>c.value);
+  if(!ids.length){ alert('กรุณาติ๊กเลือกรถอย่างน้อย 1 คัน'); return; }
+  const gid = document.getElementById('fgAssignTarget').value || null;
+  db.vehicles.forEach(v=>{ if(ids.includes(v.id)) v.fleetGroupId = gid; });
+  logActivity('ย้ายกลุ่มรถ', `ย้ายรถ ${ids.length} คัน → ${vpGroupName(gid)}`);
+  saveDB();
+  document.querySelectorAll('#fleetAssignList input[type=checkbox]').forEach(c=>c.checked=false);
+  renderFleetGroupList();
+  render();
+}
+
 /* ---------------- Rendering ---------------- */
 function render(){
   const select = document.getElementById('vehicleSelect');
-  select.innerHTML = db.vehicles.map(v=>{
-    const inspectLabel = lastInspectionLabel(v.id);
-    return `<option value="${v.id}" ${v.id===currentVehicleId?'selected':''}>${escapeHtml(v.name)}${v.driver ? ' — ' + escapeHtml(v.driver) : ''} [${FLEET_STATUS[v.status||'ready'].label}${inspectLabel ? ' · ' + inspectLabel : ''}]</option>`;
-  }).join('');
+  select.innerHTML = db.vehicles.map(v=>
+    `<option value="${v.id}" ${v.id===currentVehicleId?'selected':''}>${escapeHtml(v.name)}</option>`
+  ).join('');
+  renderVehPicker();
   document.getElementById('deleteVehicleBtn').style.display = db.vehicles.length ? 'inline-block' : 'none';
   document.getElementById('editVehicleBtn').style.display = db.vehicles.length ? 'inline-block' : 'none';
 

@@ -2698,6 +2698,10 @@ async function _runDBSync(){
       const { data: latest, error: pullErr } = await supabaseClient
         .rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
       if(!pullErr && latest){
+        if(Array.isArray(latest.kmLogsRemovedIds) && latest.kmLogsRemovedIds.length){
+          const ids = new Set([...(db.kmLogsRemovedIds||[]), ...latest.kmLogsRemovedIds]);
+          db.kmLogsRemovedIds = Array.from(ids).slice(-3000);
+        }
         db.dailyPhotos = mergeDailyPhotosForSync(db.dailyPhotos, latest.dailyPhotos);
         db.kmLogs = mergeKmLogsForSync(db.kmLogs, latest.kmLogs);
         db.vehicles = mergeLineDriversForSync(db.vehicles, latest.vehicles);
@@ -2803,9 +2807,22 @@ function mergeDailyPhotosForSync(localArr, remoteArr){
 // above), and for km keep whichever reading is further along (both sides
 // only ever move it forward via set_vehicle_km / the km-edit UI, so the
 // larger of the two is the more recent one).
+// IDs of km entries that were deleted (or replaced by an edit) in this app.
+// Without this list the union-merge below kept pulling the server's old copy
+// back in, so a deleted/edited km reading "came back" after saving.
+// Synced to the server (db.kmLogsRemovedIds) so every device honours it.
+// A NEW reading the LINE bot creates later always gets a new id, so it is
+// never blocked by this list.
+function markKmLogRemoved(id){
+  if(!id) return;
+  db.kmLogsRemovedIds = Array.isArray(db.kmLogsRemovedIds) ? db.kmLogsRemovedIds : [];
+  if(!db.kmLogsRemovedIds.includes(id)) db.kmLogsRemovedIds.push(id);
+  if(db.kmLogsRemovedIds.length > 3000) db.kmLogsRemovedIds = db.kmLogsRemovedIds.slice(-3000);
+}
 function mergeKmLogsForSync(localArr, remoteArr){
-  const localSafe = Array.isArray(localArr) ? localArr : [];
-  const remoteSafe = Array.isArray(remoteArr) ? remoteArr : [];
+  const dead = new Set(Array.isArray(db.kmLogsRemovedIds) ? db.kmLogsRemovedIds : []);
+  const localSafe = (Array.isArray(localArr) ? localArr : []).filter(e=>e && !dead.has(e.id));
+  const remoteSafe = (Array.isArray(remoteArr) ? remoteArr : []).filter(e=>e && !dead.has(e.id));
   const byKey = new Map();
   for(const e of localSafe){
     const removed = e.removedImages || [];
@@ -2826,7 +2843,14 @@ function mergeKmLogsForSync(localArr, remoteArr){
       existing.removedImages = Array.from(removedSet);
       const localKm = existing.km == null ? null : Number(existing.km);
       const remoteKm = r.km == null ? null : Number(r.km);
-      if(localKm == null) existing.km = remoteKm;
+      // kmSetAt = when someone typed/edited this reading in the web app. An
+      // edit that hasn't reached the server yet must win even if it's LOWER
+      // (fixing a typo like 1,018,457 → 121,845); otherwise the larger value
+      // wins as before (bot readings only ever move forward).
+      const lAt = Date.parse(existing.kmSetAt || 0) || 0, rAt = Date.parse(r.kmSetAt || 0) || 0;
+      if(lAt > rAt && localKm != null) existing.km = localKm;
+      else if(rAt > lAt && remoteKm != null){ existing.km = remoteKm; existing.kmSetAt = r.kmSetAt; }
+      else if(localKm == null) existing.km = remoteKm;
       else if(remoteKm != null) existing.km = Math.max(localKm, remoteKm);
     }
   }
@@ -2976,8 +3000,10 @@ function daysBetween(a,b){ return Math.round((new Date(b) - new Date(a)) / 86400
 function logKmReading(vehicleId, date, km, images=[]){
   const imgs = (images || []).slice(0, 10);
   const existing = db.kmLogs.find(l=>l.vehicleId===vehicleId && l.date===date);
+  const setAt = new Date().toISOString();
   if(existing){
     existing.km = km;
+    existing.kmSetAt = setAt;
     // Editing a km entry replaces its whole images list from the modal's
     // draft — anything that was in the old list but isn't in the new one
     // was an explicit removal in the edit screen. Tombstone those (same
@@ -2991,7 +3017,7 @@ function logKmReading(vehicleId, date, km, images=[]){
     }
     if(imgs.length) existing.images = imgs; else delete existing.images;
   }else{
-    const entry = {id:uid(), vehicleId, date, km};
+    const entry = {id:uid(), vehicleId, date, km, kmSetAt: setAt};
     if(imgs.length) entry.images = imgs;
     db.kmLogs.push(entry);
   }
@@ -3359,6 +3385,7 @@ function deleteVehicle(){
   db.vehicles = db.vehicles.filter(x=>x.id!==currentVehicleId);
   db.tasks = db.tasks.filter(x=>x.vehicleId!==currentVehicleId);
   db.logs = db.logs.filter(x=>x.vehicleId!==currentVehicleId);
+  db.kmLogs.filter(x=>x.vehicleId===currentVehicleId).forEach(x=>markKmLogRemoved(x.id));
   db.kmLogs = db.kmLogs.filter(x=>x.vehicleId!==currentVehicleId);
   db.oilLogs = db.oilLogs.filter(x=>x.vehicleId!==currentVehicleId);
   db.maintenanceLogs = db.maintenanceLogs.filter(x=>x.vehicleId!==currentVehicleId);
@@ -3813,7 +3840,14 @@ async function submitLogModal(){
   if(logModalEditId){
     const list = logModalType==='km' ? db.kmLogs : db.oilLogs;
     const idx = list.findIndex(l=>l.id===logModalEditId);
-    if(idx>-1) list.splice(idx,1);
+    if(idx>-1){
+      if(logModalType==='km'){
+        // the edited entry is replaced by a new one (new id) below — make
+        // sure the server's old copy can't be merged back in
+        markKmLogRemoved(list[idx].id);
+      }
+      list.splice(idx,1);
+    }
   }
 
   const vName = (db.vehicles.find(v=>v.id===vehicleId)||{}).name || vehicleId;
@@ -3854,6 +3888,7 @@ function deleteLogEntry(type, logId){
   if(!entry) return;
   const vehicleId = entry.vehicleId;
   if(type==='km'){
+    markKmLogRemoved(logId);
     db.kmLogs = db.kmLogs.filter(l=>l.id!==logId);
     resyncVehicleCurrentKm(vehicleId);
   }else{

@@ -652,6 +652,10 @@
     display:inline-block; background:var(--ok-bg); color:var(--ok); font-weight:700;
     border-radius:6px; padding:4px 8px; font-size:12.5px;
   }
+  .tire-cal-move{
+    display:inline-block; background:var(--steel-soft); color:var(--muted); font-weight:600;
+    border-radius:6px; padding:4px 8px; font-size:12px;
+  }
 
   /* Per-wheel-position coverage chips */
   .tire-coverage-vehicle{ margin-bottom:16px; padding:6px; border-radius:10px; transition:box-shadow .3s ease, background .3s ease; }
@@ -2594,19 +2598,19 @@ function openIDB(){
   });
 }
 
-function idbGet(){
+function idbGet(key=IDB_KEY){
   return openIDB().then(idb => new Promise((resolve, reject)=>{
     const tx = idb.transaction(IDB_STORE, 'readonly');
-    const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+    const req = tx.objectStore(IDB_STORE).get(key);
     req.onsuccess = ()=> resolve(req.result || null);
     req.onerror = ()=> reject(req.error);
   }));
 }
 
-function idbPut(data){
+function idbPut(data, key=IDB_KEY){
   return openIDB().then(idb => new Promise((resolve, reject)=>{
     const tx = idb.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).put(data, IDB_KEY);
+    tx.objectStore(IDB_STORE).put(data, key);
     tx.oncomplete = ()=> resolve(true);
     tx.onerror = ()=> reject(tx.error);
   }));
@@ -2682,47 +2686,163 @@ async function pullDBFromSupabase(){
 // dedupes concurrent callers so a flush during a still-running push just
 // waits on the same request instead of firing a second one.
 let dbSyncInFlight = null;
+
+/* ---------------- Three-way merge (แก้ปัญหาเครื่องที่เปิดค้างไว้ทับข้อมูลเครื่องอื่น) ----------------
+   เดิม: ทุกครั้งที่บันทึก แท็บนี้ส่ง db "ทั้งก้อน" ขึ้นไปทับบนเซิร์ฟเวอร์ (ยกเว้นรูป/
+   เลขไมล์/LINE) ถ้าแท็บนี้เปิดค้างไว้ตั้งแต่เช้า ทุกอย่างที่เครื่องอื่นบันทึกในระหว่างนั้น
+   (บันทึกยาง น้ำมันเครื่อง ซ่อม บุคลากร ฯลฯ) จะหายไป
+   ใหม่: จำ "ฐาน" (syncBase) = สำเนาข้อมูลล่าสุดที่แท็บนี้ตรงกับเซิร์ฟเวอร์ แล้วเทียบ
+   ทีละรายการ (ตาม id) ว่าใครเปลี่ยนอะไร:
+     - แท็บนี้ไม่ได้แก้ → ใช้ของเซิร์ฟเวอร์ (ได้ของใหม่จากเครื่องอื่น/รวมถึงการลบ)
+     - แท็บนี้แก้/เพิ่ม/ลบ → ใช้ของแท็บนี้ (ถ้าแก้รายการเดียวกันพร้อมกันทั้งสองฝั่ง ของแท็บนี้ชนะ)
+   รูปรายวัน/เลขไมล์/การผูก LINE ยังใช้การรวมแบบเดิม (ด้านล่าง) เพราะบอท LINE เขียนเข้ามาด้วย */
+const SYNC_BASE_KEY = 'syncBase';
+const SYNC_SPECIAL_KEYS = new Set(['dailyPhotos','kmLogs','kmLogsRemovedIds','_syncedAt']);
+let syncBase = null;
+
+function cloneJSON(o){ return o==null ? o : JSON.parse(JSON.stringify(o)); }
+function sameJSON(a,b){ return JSON.stringify(a)===JSON.stringify(b); }
+function syncRecKey(r){ return (r && typeof r==='object' && r.id!=null) ? 'id:'+r.id : 'json:'+JSON.stringify(r); }
+
+function setSyncBase(snapshot){
+  syncBase = snapshot;
+  if(supportsIDB && snapshot){
+    idbPut(snapshot, SYNC_BASE_KEY).catch(err=> console.error('บันทึกฐานการซิงก์ไม่สำเร็จ', err));
+  }
+}
+
+function threeWayArray(L, R, B, stats){
+  L = Array.isArray(L)?L:[]; R = Array.isArray(R)?R:[]; B = Array.isArray(B)?B:[];
+  const lm = new Map(L.map(r=>[syncRecKey(r), r]));
+  const rm = new Map(R.map(r=>[syncRecKey(r), r]));
+  const bm = new Map(B.map(r=>[syncRecKey(r), r]));
+  const keys = [...lm.keys(), ...[...rm.keys()].filter(k=>!lm.has(k)), ...[...bm.keys()].filter(k=>!lm.has(k) && !rm.has(k))];
+  const out = [];
+  keys.forEach(k=>{
+    const l = lm.get(k), r = rm.get(k), b = bm.get(k);
+    const lChanged = !sameJSON(l, b);
+    if(lChanged) stats.localChanged = true;
+    const pick = lChanged ? l : r;
+    if(!lChanged && !sameJSON(l, r)) stats.remoteApplied = true;
+    if(pick !== undefined) out.push(pick);
+  });
+  return out;
+}
+
+function threeWayObject(L, R, B, stats){
+  L = (L && typeof L==='object') ? L : {}; R = (R && typeof R==='object') ? R : {}; B = (B && typeof B==='object') ? B : {};
+  const out = {};
+  new Set([...Object.keys(L), ...Object.keys(R), ...Object.keys(B)]).forEach(k=>{
+    const lChanged = !sameJSON(L[k], B[k]);
+    if(lChanged) stats.localChanged = true;
+    else if(!sameJSON(L[k], R[k])) stats.remoteApplied = true;
+    const v = lChanged ? L[k] : R[k];
+    if(v !== undefined) out[k] = v;
+  });
+  return out;
+}
+
+// รวม local (แท็บนี้) + remote (เซิร์ฟเวอร์) โดยใช้ base (จุดที่เคยตรงกันล่าสุด)
+function mergeDBThreeWay(local, remote, base){
+  const stats = {localChanged:false, remoteApplied:false};
+  local = local || {}; remote = remote || {}; base = base || remote;
+  const merged = {};
+  new Set([...Object.keys(local), ...Object.keys(remote), ...Object.keys(base)]).forEach(k=>{
+    if(SYNC_SPECIAL_KEYS.has(k)) return;
+    const l = local[k], r = remote[k], b = base[k];
+    if(Array.isArray(l) || Array.isArray(r) || Array.isArray(b)){
+      merged[k] = threeWayArray(l, r, b, stats);
+    }else if([l,r,b].some(x=> x && typeof x==='object')){
+      merged[k] = threeWayObject(l, r, b, stats);
+    }else{
+      const lChanged = !sameJSON(l, b);
+      if(lChanged) stats.localChanged = true;
+      else if(!sameJSON(l, r)) stats.remoteApplied = true;
+      const v = lChanged ? l : r;
+      if(v !== undefined) merged[k] = v;
+    }
+  });
+  // การผูก LINE ของแต่ละคัน — รวมแบบเดิมเผื่อแท็บนี้แก้รถคันเดียวกันกับที่บอทเพิ่งเขียน
+  merged.vehicles = mergeLineDriversForSync(merged.vehicles, remote.vehicles);
+
+  // รูปรายวัน / เลขไมล์ / รายการไมล์ที่ถูกลบ — ใช้การรวมแบบเดิม
+  const removedIds = new Set([...(local.kmLogsRemovedIds||[]), ...(remote.kmLogsRemovedIds||[])]);
+  merged.kmLogsRemovedIds = Array.from(removedIds).slice(-3000);
+  const prevRemoved = db.kmLogsRemovedIds;
+  db.kmLogsRemovedIds = merged.kmLogsRemovedIds; // mergeKmLogsForSync อ่านค่านี้จาก db
+  merged.dailyPhotos = mergeDailyPhotosForSync(local.dailyPhotos, remote.dailyPhotos);
+  merged.kmLogs = mergeKmLogsForSync(local.kmLogs, remote.kmLogs);
+  db.kmLogsRemovedIds = prevRemoved;
+  ['dailyPhotos','kmLogs','kmLogsRemovedIds'].forEach(k=>{
+    if(!sameJSON(local[k]||[], base[k]||[])) stats.localChanged = true;
+    if(!sameJSON(merged[k], local[k]||[])) stats.remoteApplied = true;
+  });
+  merged._syncedAt = local._syncedAt || remote._syncedAt;
+  return {db: merged, ...stats};
+}
+
+// หลังรับข้อมูลใหม่จากเครื่องอื่น — วาดหน้าจอใหม่ แต่ไม่รบกวนตอนกำลังกรอกฟอร์ม/เปิดหน้าต่างอยู่
+function refreshAfterRemoteMerge(){
+  if(currentUser){
+    const fresh = (db.users||[]).find(u=>u.id===currentUser.id);
+    if(fresh){ currentUser = fresh; isAdmin = fresh.role==='admin'; }
+  }
+  const modalOpen = !!document.querySelector('.overlay.show');
+  const ae = document.activeElement;
+  const typing = ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+  if(!currentUser || modalOpen || typing){
+    if(currentView === 'dailyphotos' && !modalOpen) renderDailyPhotosView();
+    return;
+  }
+  render();
+}
+
 async function _runDBSync(){
   try{
-    // This tab's `db` is whatever was in memory since page load (or the
-    // last successful pull) — but db.dailyPhotos and db.kmLogs can also be
-    // written concurrently by the LINE bot (drivers sending photos or
-    // texting "ไมล์ ...") at any time in between, via its own atomic RPCs.
-    // Since this call otherwise overwrites the ENTIRE app_state blob with
-    // this tab's copy, skipping this step would silently wipe out anything
-    // the bot added during that window — that's what was happening. Pull
-    // the latest photos/km right before sending and merge them in (union of
-    // both sides, nothing dropped either direction) so a stale tab can
-    // never erase newer bot-written data.
-    try{
-      const { data: latest, error: pullErr } = await supabaseClient
-        .rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
-      if(!pullErr && latest){
-        if(Array.isArray(latest.kmLogsRemovedIds) && latest.kmLogsRemovedIds.length){
-          const ids = new Set([...(db.kmLogsRemovedIds||[]), ...latest.kmLogsRemovedIds]);
-          db.kmLogsRemovedIds = Array.from(ids).slice(-3000);
-        }
-        db.dailyPhotos = mergeDailyPhotosForSync(db.dailyPhotos, latest.dailyPhotos);
-        db.kmLogs = mergeKmLogsForSync(db.kmLogs, latest.kmLogs);
-        db.vehicles = mergeLineDriversForSync(db.vehicles, latest.vehicles);
-      }
-    }catch(mergeErr){
-      console.error('ดึงข้อมูลรูป/เลขไมล์/การลงทะเบียน LINE ล่าสุดก่อนซิงก์ไม่สำเร็จ (จะซิงก์ด้วยข้อมูลในเครื่องต่อไปโดยไม่รวมของใหม่จากบอท)', mergeErr);
+    // 1) ดึงของล่าสุดบนเซิร์ฟเวอร์ — ถ้าดึงไม่ได้ (เน็ตหลุด) ห้ามส่งทับแบบไม่เช็ค
+    //    ข้อมูลยังอยู่ในเครื่อง (IndexedDB) แล้ว ครั้งถัดไปที่บันทึก/ทุก 1 นาทีจะลองใหม่เอง
+    let remote = null;
+    const { data: latest, error: pullErr } = await supabaseClient
+      .rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
+    if(pullErr){ console.error('ดึงข้อมูลล่าสุดก่อนซิงก์ไม่สำเร็จ — จะลองใหม่ภายหลัง', pullErr); return; }
+    if(latest && Array.isArray(latest.vehicles)) remote = latest;
+
+    let needPush = true, remoteApplied = false;
+    if(remote){
+      const m = mergeDBThreeWay(db, remote, syncBase);
+      db = m.db;
+      needPush = m.localChanged;
+      remoteApplied = m.remoteApplied;
     }
 
-    const { error } = await supabaseClient
-      .rpc('sync_app_state', { p_secret: APP_SYNC_SECRET, p_data: db });
-    if(error) console.error('ซิงก์ข้อมูลขึ้น Supabase ไม่สำเร็จ', error);
-    // Merge above may have pulled in photos this tab didn't have yet —
-    // refresh the daily-photos screen specifically if it's the one open,
-    // so they show up without a manual reload. (Scoped to just that view,
-    // not a full render(), so it doesn't disturb an in-progress edit on
-    // any other screen that happens to be open at the same time.)
-    if(currentView === 'dailyphotos') renderDailyPhotosView();
+    // 2) ส่งขึ้นเฉพาะเมื่อแท็บนี้มีของเปลี่ยนจริง (ไม่งั้นแค่รับของใหม่มา)
+    const snapshot = cloneJSON(db);
+    if(needPush){
+      const { error } = await supabaseClient
+        .rpc('sync_app_state', { p_secret: APP_SYNC_SECRET, p_data: snapshot });
+      if(error){ console.error('ซิงก์ข้อมูลขึ้น Supabase ไม่สำเร็จ', error); return; }
+    }
+    setSyncBase(snapshot);
+    if(remoteApplied){
+      if(supportsIDB) idbPut(db).catch(err=> console.error('บันทึกข้อมูลที่รวมแล้วลงเครื่องไม่สำเร็จ', err));
+      refreshAfterRemoteMerge();
+    }
   }catch(err){
     console.error('เชื่อมต่อ Supabase ไม่สำเร็จ (บันทึก) — ข้อมูลยังถูกเก็บไว้ในเครื่องแล้ว จะลองซิงก์ใหม่ในครั้งถัดไป', err);
   }
 }
+
+// ดึงของใหม่จากเครื่องอื่นเป็นระยะ (ทุก 1 นาที ตอนหน้าจอเปิดอยู่) และทันทีที่กลับมาที่แท็บนี้
+// เพื่อไม่ให้แท็บที่เปิดค้างไว้นานๆ ค้างข้อมูลเก่า
+function backgroundSyncTick(){
+  if(typeof supabaseClient === 'undefined' || !supabaseClient || !currentUser) return;
+  if(document.visibilityState !== 'visible' || dbSyncTimer || dbSyncInFlight) return;
+  startDBSync();
+}
+setInterval(backgroundSyncTick, 60000);
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible') backgroundSyncTick();
+});
 
 function pushDBToSupabase(){
   // Debounced — saveDB() can fire many times in a row (every field edit),
@@ -2733,8 +2853,18 @@ function pushDBToSupabase(){
   clearTimeout(dbSyncTimer);
   dbSyncTimer = setTimeout(()=>{
     dbSyncTimer = null;
-    dbSyncInFlight = _runDBSync().finally(()=>{ dbSyncInFlight = null; });
+    startDBSync();
   }, 800);
+}
+
+// รันการซิงก์ทีละครั้งตามคิว (ไม่ให้สองรอบทำงานซ้อนกันแล้วรวมข้อมูลผิดฐาน)
+let dbSyncChain = Promise.resolve();
+function startDBSync(){
+  const p = dbSyncChain.then(()=> _runDBSync());
+  dbSyncChain = p.catch(()=>{});
+  dbSyncInFlight = p;
+  p.finally(()=>{ if(dbSyncInFlight === p) dbSyncInFlight = null; }).catch(()=>{});
+  return p;
 }
 
 // Cancels any pending debounce and syncs right now, returning a promise the
@@ -2743,10 +2873,8 @@ function pushDBToSupabase(){
 // any other "บันทึก" button that closes the screen right after saving.
 async function flushDBSyncNow(){
   if(dbSyncTimer){ clearTimeout(dbSyncTimer); dbSyncTimer = null; }
-  if(!dbSyncInFlight){
-    dbSyncInFlight = _runDBSync().finally(()=>{ dbSyncInFlight = null; });
-  }
-  await dbSyncInFlight;
+  // ต่อคิวหลังรอบที่กำลังทำอยู่ (ถ้ามี) เพื่อให้รอบนี้รวมการแก้ไขล่าสุดด้วยเสมอ
+  await startDBSync();
 }
 
 // Safety net: if the app is backgrounded or closed while a sync is still
@@ -2990,7 +3118,12 @@ function newerDB(a, b){
 
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
-function todayStr(){ return new Date().toISOString().slice(0,10); }
+// วันที่ "วันนี้" ตามเวลาเครื่อง (เวลาไทย) — เดิมใช้ toISOString() ซึ่งเป็นเวลา UTC
+// ทำให้ช่วง 00:00–06:59 ได้วันที่ของเมื่อวาน
+function todayStr(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 function daysBetween(a,b){ return Math.round((new Date(b) - new Date(a)) / 86400000); }
 
 /* Record (or overwrite) a km reading for a given date, and keep the vehicle's
@@ -6544,6 +6677,19 @@ function tirePositionDefs(wheelCount){
    บ้าง โดยดูจากบันทึกที่ระบุตำแหน่งไว้ชัดเจน (positions) หรือถ้าเป็นบันทึกเก่า
    ที่ไม่มีตำแหน่ง แต่เปลี่ยนครบทุกเส้นในคราวเดียว (count >= จำนวนล้อ) ก็ถือว่า
    คลุมทุกตำแหน่งด้วย */
+// เลขไมล์ของรถ ณ วันที่หนึ่ง จากบันทึกเลขไมล์ (ใช้แทนเมื่อบันทึกยางไม่ได้ใส่เลขไมล์ไว้)
+// เอาค่าล่าสุดที่ไม่เกินวันนั้น ถ้าไม่มีก็เอาค่าแรกหลังวันนั้น
+function kmAtDate(vehicleId, date){
+  const logs = db.kmLogs.filter(l=>l.vehicleId===vehicleId && l.km!=null && l.date).sort((a,b)=>a.date.localeCompare(b.date));
+  let before = null, after = null;
+  for(const l of logs){
+    if(l.date <= date) before = l;
+    else { after = l; break; }
+  }
+  const pick = before || after;
+  return pick ? Number(pick.km) : null;
+}
+
 function getTirePositionStatuses(v){
   const wheelCount = wheelCountOf(v);
   const positions = tirePositionDefs(wheelCount);
@@ -6558,14 +6704,26 @@ function getTirePositionStatuses(v){
       if(l.positions && l.positions.length && l.positions.includes(pos.id)){ latest = l; break; }
       if((!l.positions || !l.positions.length) && l.count!=null && l.count>=wheelCount){ latest = l; break; }
     }
-    const baselineKm = latest ? (latest.wearBaselineKm!=null ? latest.wearBaselineKm : (latest.km||0)) : 0;
-    const sinceKm = Math.max(0, (v.currentKm||0) - baselineKm);
+    // จุดเริ่มนับ: ไมล์ตอนติดตั้งเดิม (ยางที่ย้ายมา) > ไมล์ในบันทึก > ไมล์จากบันทึกเลขไมล์วันนั้น
+    // เดิมถ้าบันทึกไม่มีเลขไมล์จะนับจาก 0 ทำให้ขึ้น "เกินกำหนด" ทันที
+    let baselineKm = null, kmEstimated = false;
+    if(latest){
+      if(latest.wearBaselineKm!=null) baselineKm = latest.wearBaselineKm;
+      else if(latest.km!=null) baselineKm = latest.km;
+      else{
+        const est = kmAtDate(v.id, latest.wearBaselineDate || latest.date);
+        if(est!=null){ baselineKm = est; kmEstimated = true; }
+      }
+    }
+    const kmUnknown = !!latest && baselineKm==null;
+    const sinceKm = (latest && !kmUnknown) ? Math.max(0, (v.currentKm||0) - baselineKm) : 0;
     const kmLeft = interval - sinceKm;
     let status = 'never';
     if(latest){
-      status = kmLeft<=0 ? 'overdue' : (kmLeft<=warnKm ? 'soon' : 'ok');
+      if(kmUnknown) status = 'soon';
+      else status = kmLeft<=0 ? 'overdue' : (kmLeft<=warnKm ? 'soon' : 'ok');
     }
-    return {...pos, latest, sinceKm, kmLeft, status};
+    return {...pos, latest, sinceKm, kmLeft, status, kmUnknown, kmEstimated};
   });
 }
 
@@ -6577,19 +6735,30 @@ function quickSetWheelCount(vehicleId, count){
   renderTiresView();
 }
 
+// สถานะรวมของทั้งคัน = เส้นที่แย่ที่สุด (เดิมดูแค่บันทึกล่าสุดใบเดียว เปลี่ยน 2 เส้น
+// ทั้งคันก็กลายเป็น "ปกติ" ทั้งที่เส้นอื่นเกินรอบ/ยังไม่เคยเปลี่ยน)
 function getTireStatus(v){
   const interval = tireInterval(v);
-  const logs = db.tireLogs.filter(l=>l.vehicleId===v.id).sort((a,b)=> a.date.localeCompare(b.date));
-  const latest = logs.length ? logs[logs.length-1] : null;
-  const baselineKm = latest ? (latest.km||0) : 0;
-  const sinceKm = Math.max(0, (v.currentKm||0) - baselineKm);
-  const kmLeft = interval - sinceKm;
-  const warnKm = (db.settings && db.settings.warningKm) || 1000;
+  const pos = getTirePositionStatuses(v);
+  const allLogs = db.tireLogs.filter(l=>l.vehicleId===v.id).sort((a,b)=> a.date.localeCompare(b.date));
+  const realLogs = allLogs.filter(l=>!isTireRelocationLog(l));
+  const latest = realLogs.length ? realLogs[realLogs.length-1] : (allLogs.length ? allLogs[allLogs.length-1] : null);
+
+  const measured = pos.filter(p=>p.latest && !p.kmUnknown);
+  const worst = measured.length ? measured.reduce((a,b)=> b.kmLeft < a.kmLeft ? b : a) : null;
+  const neverCount = pos.filter(p=>!p.latest).length;
+  const unknownCount = pos.filter(p=>p.kmUnknown).length;
+
   let status = 'ok';
-  if(!latest){ status = 'soon'; } // ยังไม่เคยบันทึกเลย — เตือนให้เริ่มบันทึกไว้ก่อน
-  else if(kmLeft <= 0) status = 'overdue';
-  else if(kmLeft <= warnKm) status = 'soon';
-  return {vehicle:v, latest, sinceKm, kmLeft, interval, status};
+  if(!latest) status = 'soon'; // ยังไม่เคยบันทึกเลย — เตือนให้เริ่มบันทึกไว้ก่อน
+  else if(pos.some(p=>p.status==='overdue')) status = 'overdue';
+  else if(pos.some(p=>p.status==='soon') || neverCount>0) status = 'soon';
+  return {
+    vehicle:v, latest, interval, status, neverCount, unknownCount, positions:pos,
+    hasKmData: !!worst,
+    sinceKm: worst ? worst.sinceKm : 0,
+    kmLeft: worst ? worst.kmLeft : interval
+  };
 }
 
 function quickSetTireInterval(vehicleId, km){
@@ -6740,11 +6909,21 @@ async function submitTireLogModal(){
     receiptImage = existing ? (existing.receiptImage || null) : null;
   }
 
+  // ตอนแก้ไข ต้องเก็บข้อมูลที่ฟอร์มไม่มีช่องให้กรอกไว้ด้วย (เดิมหายหมดเมื่อกดบันทึก):
+  // - relocation: รายการ "ย้ายยางเก่า" ต้องยังเป็นรายการย้ายยาง ไม่กลายเป็นยางใหม่
+  // - wearBaselineKm/Date: ไมล์ตอนติดตั้งเดิมของยางที่ย้ายมา ใช้คำนวณรอบเปลี่ยนของเส้นนั้น
+  let prevEntry = null;
   if(tireLogEditId){
     const idx = db.tireLogs.findIndex(l=>l.id===tireLogEditId);
-    if(idx>-1) db.tireLogs.splice(idx,1);
+    if(idx>-1){ prevEntry = db.tireLogs[idx]; db.tireLogs.splice(idx,1); }
   }
-  const entry = {id: tireLogEditId || uid(), vehicleId, date, km, count, note};
+  const wasRelocation = !!(prevEntry && isTireRelocationLog(prevEntry));
+  const entry = {id: tireLogEditId || uid(), vehicleId, date, km, count: wasRelocation ? null : count, note};
+  if(wasRelocation) entry.relocation = true;
+  if(prevEntry && prevEntry.wearBaselineKm!=null){
+    entry.wearBaselineKm = prevEntry.wearBaselineKm;
+    if(prevEntry.wearBaselineDate) entry.wearBaselineDate = prevEntry.wearBaselineDate;
+  }
   if(positions.length) entry.positions = positions;
   if(cost!=null && !isNaN(cost)) entry.cost = cost;
   if(receiptImage) entry.receiptImage = receiptImage;
@@ -6796,11 +6975,14 @@ function maybeOfferTireRelocate(vehicleId, changedPositionIds, moveDate, moveKm,
   const changedDefs = allPositions.filter(p=>changedPositionIds.includes(p.id));
   if(!otherPositions.length || !changedDefs.length) return; // ไม่มีตำแหน่งอื่นให้ย้ายไป
 
+  // เดาตำแหน่งปลายทาง (ฝั่งเดียวกัน) โดยไม่ให้ยางสองเส้นถูกเดาไปลงตำแหน่งเดียวกัน
+  const usedDest = new Set();
   tireRelocateContext = {
     vehicleId, moveDate, moveKm,
     items: changedDefs.map(cd=>{
       const side = tirePositionSide(cd.label);
-      const suggestion = side ? (otherPositions.find(op=>tirePositionSide(op.label)===side) || null) : null;
+      const suggestion = side ? (otherPositions.find(op=>tirePositionSide(op.label)===side && !usedDest.has(op.id)) || null) : null;
+      if(suggestion) usedDest.add(suggestion.id);
       const prior = findPriorPositionLog(vehicleId, cd.id, newEntryId);
       const origDate = prior ? (prior.wearBaselineDate || prior.date) : '';
       const origKm = prior ? (prior.wearBaselineKm!=null ? prior.wearBaselineKm : (prior.km!=null ? prior.km : '')) : '';
@@ -6849,6 +7031,11 @@ function submitTireRelocate(){
   const {vehicleId, moveDate, moveKm, items} = tireRelocateContext;
   const v = db.vehicles.find(v=>v.id===vehicleId);
   const allPositions = v ? tirePositionDefs(wheelCountOf(v)) : [];
+  const chosen = items.map((it, idx)=>{ const el = document.getElementById('tireRelocateDest_'+idx); return el ? el.value : ''; }).filter(Boolean);
+  if(new Set(chosen).size !== chosen.length){
+    alert('เลือกตำแหน่งปลายทางซ้ำกัน — ยางแต่ละเส้นต้องย้ายไปคนละตำแหน่ง กรุณาตรวจสอบอีกครั้ง');
+    return;
+  }
   let moved = 0;
   items.forEach((it, idx)=>{
     const destSel = document.getElementById('tireRelocateDest_'+idx);
@@ -6870,7 +7057,7 @@ function submitTireRelocate(){
 
     const entry = {
       id: uid(), vehicleId, date: moveDate, km: (moveKm!=null ? moveKm : null), count: null,
-      positions: [destId],
+      positions: [destId], relocation: true,
       note: `ยางเก่าจากตำแหน่ง "${it.sourceLabel}" ย้ายมาเป็น "${destLabel}" — ${origInfo} (ย้ายจริงเมื่อ ${formatThaiDateShort(moveDate)}${moveKm!=null ? ' · '+moveKm.toLocaleString()+' กม.' : ''})`
     };
     if(hasOrig && origKm!=null){ entry.wearBaselineKm = origKm; entry.wearBaselineDate = origDateInput; }
@@ -7036,7 +7223,18 @@ function tireYearOptions(){
 function renderTireStatusTable(statuses){
   const order = {overdue:0, soon:1, ok:2};
   const rows = statuses.slice().sort((a,b)=> order[a.status]-order[b.status] || a.vehicle.name.localeCompare(b.vehicle.name,'th'));
-  const pillLabel = s => s.status==='overdue' ? 'เกินกำหนด' : (s.status==='soon' ? (s.latest ? 'ใกล้ถึงกำหนด' : 'ยังไม่เคยบันทึก') : 'ปกติ');
+  const pillLabel = s => {
+    if(!s.latest) return 'ยังไม่เคยบันทึก';
+    const parts = [];
+    if(s.hasKmData){
+      if(s.kmLeft<=0) parts.push(`เกินกำหนด (เกิน ${Math.abs(Math.round(s.kmLeft)).toLocaleString()} กม.)`);
+      else if(s.status==='soon' && s.positions.some(p=>p.status==='soon' && !p.kmUnknown)) parts.push(`ใกล้ถึงกำหนด (เหลือ ${Math.round(s.kmLeft).toLocaleString()} กม.)`);
+      else parts.push(`ปกติ (เหลือ ${Math.round(s.kmLeft).toLocaleString()} กม.)`);
+    }
+    if(s.neverCount) parts.push(`ยังไม่มีบันทึก ${s.neverCount} เส้น`);
+    if(s.unknownCount) parts.push(`ไม่ทราบเลขไมล์ ${s.unknownCount} เส้น`);
+    return parts.join(' · ') || 'ปกติ';
+  };
 
   return `
     <table class="summary-table">
@@ -7049,8 +7247,8 @@ function renderTireStatusTable(statuses){
           return `<tr class="${s.status}">
             <td><button type="button" class="tire-plate-link" onclick="scrollToTireCoverage('${v.id}')" title="ดูสถานะยางทีละเส้นของคันนี้">${escapeHtml(v.name)}</button></td>
             <td>${s.latest ? formatThaiDateShort(s.latest.date) + (s.latest.km!=null ? ' · ไมล์ '+s.latest.km.toLocaleString()+' กม.' : '') : '<span class="hint">ยังไม่เคยบันทึก</span>'}</td>
-            <td class="mono">${s.latest ? Math.round(s.sinceKm).toLocaleString() : '—'}</td>
-            <td><span class="status-pill ${s.status==='overdue'?'overdue':(s.status==='soon'?'soon':'ok')}">${pillLabel(s)}${s.latest ? (s.status==='overdue' ? ` (เกิน ${Math.abs(Math.round(s.kmLeft)).toLocaleString()} กม.)` : ` (เหลือ ${Math.round(s.kmLeft).toLocaleString()} กม.)`) : ''}</span></td>
+            <td class="mono">${s.hasKmData ? Math.round(s.sinceKm).toLocaleString() : '—'}</td>
+            <td><span class="status-pill ${s.status==='overdue'?'overdue':(s.status==='soon'?'soon':'ok')}">${pillLabel(s)}</span></td>
             <td>
               <select onchange="quickSetWheelCount('${v.id}', this.value)" style="padding:5px 8px; border-radius:6px; border:1px solid var(--steel); background:var(--panel-2); color:var(--paper); font-size:12.5px;">
                 ${WHEEL_COUNT_PRESETS.map(n=>`<option value="${n}" ${n===wheelCountOf(v)?'selected':''}>${n} ล้อ</option>`).join('')}
@@ -7086,14 +7284,16 @@ function renderTireCoverageSection(vehiclesForView){
             // เส้นที่ยังไม่เคยมีบันทึกเลย ไม่มีจุดเริ่มนับ (baseline) ที่เชื่อถือได้
             // จึงโชว์แค่สถานะ "ยังไม่เคยเปลี่ยน" — ไม่ใส่แถบระยะทาง/ตัวเลขที่จะดูเข้าใจผิดได้
             const pct = p.latest ? Math.max(0, Math.min(100, Math.round((p.sinceKm/interval)*100))) : 0;
-            const progressHtml = p.latest ? `
+            const progressHtml = (p.latest && p.kmUnknown) ? `
+              <span class="tire-pos-left warn">ไม่ทราบเลขไมล์ตอนเปลี่ยน — แก้บันทึกเพื่อใส่ไมล์</span>
+            ` : p.latest ? `
               <div class="tire-pos-progress-track"><div class="tire-pos-progress-fill ${p.status}" style="width:${pct}%"></div></div>
               <span class="tire-pos-km">${Math.round(p.sinceKm).toLocaleString()} / ${interval.toLocaleString()} กม.</span>
               ${p.status==='overdue'
                 ? `<span class="tire-pos-over">เกิน ${Math.abs(Math.round(p.kmLeft)).toLocaleString()} กม.</span>`
                 : `<span class="tire-pos-left ${p.status==='soon'?'warn':''}">เหลือ ${Math.round(p.kmLeft).toLocaleString()} กม.</span>`}
             ` : '';
-            return `<div class="tire-pos-chip ${p.status}" title="${p.latest ? 'เปลี่ยนล่าสุด '+formatThaiDateShort(p.latest.date)+(p.latest.km!=null?' · '+p.latest.km.toLocaleString()+' กม.':'') : 'ยังไม่มีบันทึกของตำแหน่งนี้'}">
+            return `<div class="tire-pos-chip ${p.status}" title="${p.latest ? 'เปลี่ยนล่าสุด '+formatThaiDateShort(p.latest.date)+(p.latest.km!=null?' · '+p.latest.km.toLocaleString()+' กม.':'')+(p.kmEstimated?' (ไม่ได้ใส่ไมล์ไว้ — ประมาณจากบันทึกเลขไมล์วันนั้น)':'') : 'ยังไม่มีบันทึกของตำแหน่งนี้'}">
               <span class="lbl">${escapeHtml(p.label)}</span>
               <span class="sub">${subLabel}</span>
               ${progressHtml}
@@ -7104,16 +7304,26 @@ function renderTireCoverageSection(vehiclesForView){
   }).join('');
 }
 
+// รายการที่สร้างจากหน้าต่าง "ย้ายยางเก่า" (รวมรายการเก่าที่บันทึกก่อนมี flag relocation)
+function isTireRelocationLog(l){
+  return !!l.relocation || (l.count==null && typeof l.note==='string' && l.note.startsWith('ยางเก่าจากตำแหน่ง'));
+}
+
 function renderTireGrid(vehicles){
   const year = tireViewYear;
   const byVehicleMonth = {};
   db.tireLogs.forEach(l=>{
     if(parseInt(l.date.slice(0,4)) !== year) return;
     const m = parseInt(l.date.slice(5,7));
-    const cell = (byVehicleMonth[l.vehicleId] = byVehicleMonth[l.vehicleId] || {})[m] || {count:0, cost:0, entries:0};
-    cell.count += (l.count||1);
+    const cell = (byVehicleMonth[l.vehicleId] = byVehicleMonth[l.vehicleId] || {})[m] || {count:0, cost:0, entries:0, moves:0};
+    // รายการ "ย้ายยางเก่า" ไม่ใช่ยางใหม่ ไม่นับเป็นจำนวนเส้นที่เปลี่ยน
+    if(isTireRelocationLog(l)){
+      cell.moves += 1;
+    }else{
+      cell.count += (l.count!=null ? l.count : ((l.positions && l.positions.length) || 1));
+      cell.entries += 1;
+    }
     cell.cost += (l.cost||0);
-    cell.entries += 1;
     byVehicleMonth[l.vehicleId][m] = cell;
   });
 
@@ -7132,8 +7342,10 @@ function renderTireGrid(vehicles){
             ${Array.from({length:12}, (_,i)=>i+1).map(m=>{
               const cell = row[m];
               return cell
-                ? `<td style="text-align:center; cursor:pointer;" onclick="openTireCell('${v.id}', ${m})" title="คลิกเพื่อดูรายละเอียด">
-                    <span class="tire-cal-done">✓${cell.entries>1 ? ` ×${cell.entries}` : ''}</span>
+                ? `<td style="text-align:center; cursor:pointer;" onclick="openTireCell('${v.id}', ${m})" title="เปลี่ยนยางใหม่ ${cell.count} เส้น${cell.moves ? ` · ย้ายยางเก่า ${cell.moves} เส้น` : ''} — คลิกเพื่อดูรายละเอียด">
+                    ${cell.count>0
+                      ? `<span class="tire-cal-done">✓ ${cell.count} เส้น</span>`
+                      : `<span class="tire-cal-move">ย้ายยาง</span>`}
                   </td>`
                 : `<td style="text-align:center; cursor:pointer;" onclick="openTireCell('${v.id}', ${m})" title="คลิกเพื่อบันทึก"><span class="tire-cal-empty">—</span></td>`;
             }).join('')}
@@ -7216,21 +7428,49 @@ async function initApp(){
   //    ห้ามให้ฝั่งไหนทับอีกฝั่งแบบไม่เช็ค เพราะเคยทำให้เครื่องที่เพิ่งเปิดใหม่
   //    (ข้อมูลว่างเปล่า) ไปทับข้อมูลจริงของเครื่องอื่นมาแล้ว
   let remote = null;
+  let remoteFetchFailed = false;
   try{
-    remote = await pullDBFromSupabase();
+    if(typeof supabaseClient === 'undefined' || !supabaseClient) throw new Error('โหลดไลบรารี Supabase ไม่สำเร็จ');
+    const { data, error } = await supabaseClient.rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
+    if(error) throw error;
+    remote = data || null;
   }catch(err){
+    remoteFetchFailed = true;
     console.error('ดึงข้อมูลจาก Supabase ไม่สำเร็จ, จะใช้ข้อมูลในเครื่องแทน (โหมดออฟไลน์)', err);
   }
 
-  if(remote && Array.isArray(remote.vehicles) && local && Array.isArray(local.vehicles)){
-    loaded = newerDB(local, remote); // ใหม่กว่าใครใช้ของคนนั้น (ดู db._syncedAt)
-  }else if(remote && Array.isArray(remote.vehicles)){
-    loaded = remote; // เครื่องนี้ยังไม่มีข้อมูลในเครื่องเลย ใช้ของ Supabase
-  }else{
-    loaded = local; // Supabase ยังไม่มีข้อมูล หรือดึงไม่สำเร็จ ใช้ของในเครื่อง
+  // ฐานการซิงก์ล่าสุดที่เครื่องนี้เคยตรงกับเซิร์ฟเวอร์ (ดู mergeDBThreeWay)
+  let persistedBase = null;
+  if(supportsIDB){
+    try{ persistedBase = await idbGet(SYNC_BASE_KEY); }catch(err){ console.error('อ่านฐานการซิงก์ไม่สำเร็จ', err); }
   }
 
-  // เก็บสำเนาที่เลือกแล้วไว้ทั้งสองฝั่งให้ตรงกัน (ฝั่งไหนไม่ทันสมัยก็อัปเดตให้)
+  let needPush = false;
+  const remoteOk = remote && Array.isArray(remote.vehicles);
+  const localOk = local && Array.isArray(local.vehicles);
+  if(remoteOk && localOk){
+    if(persistedBase && Array.isArray(persistedBase.vehicles)){
+      // รวมทีละรายการ: ของที่เครื่องนี้แก้ตอนออฟไลน์ + ของใหม่จากเครื่องอื่น ไม่ทับกัน
+      const m = mergeDBThreeWay(local, remote, persistedBase);
+      loaded = m.db;
+      needPush = m.localChanged;
+    }else{
+      // ยังไม่เคยมีฐาน (เพิ่งอัปเดตแอปเป็นรุ่นนี้) — ใช้วิธีเดิม: ใหม่กว่าใครใช้ของคนนั้น
+      loaded = newerDB(local, remote);
+      needPush = loaded !== remote;
+    }
+    syncBase = cloneJSON(remote);
+  }else if(remoteOk){
+    loaded = remote; // เครื่องนี้ยังไม่มีข้อมูลในเครื่องเลย ใช้ของ Supabase
+    syncBase = cloneJSON(remote);
+  }else{
+    loaded = local; // Supabase ยังไม่มีข้อมูล หรือดึงไม่สำเร็จ ใช้ของในเครื่อง
+    syncBase = persistedBase || null;
+    needPush = !!(loaded && remote === null && !remoteFetchFailed); // เซิร์ฟเวอร์ยังว่าง — ส่งของในเครื่องขึ้นไป
+  }
+  if(syncBase && remoteOk) setSyncBase(syncBase);
+
+  // เก็บสำเนาที่เลือกแล้วไว้ในเครื่อง แล้วส่งการเปลี่ยนแปลงของเครื่องนี้ขึ้นเซิร์ฟเวอร์ (ถ้ามี)
   if(loaded){
     if(loaded !== local){
       if(supportsIDB){
@@ -7239,10 +7479,8 @@ async function initApp(){
         try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(loaded)); }catch(err){}
       }
     }
-    if(loaded !== remote){
-      db = loaded; // pushDBToSupabase() อ่านจากตัวแปร db ส่วนกลาง ต้องตั้งก่อนเรียก
-      pushDBToSupabase();
-    }
+    db = loaded; // pushDBToSupabase() อ่านจากตัวแปร db ส่วนกลาง ต้องตั้งก่อนเรียก
+    if(needPush) pushDBToSupabase();
   }
 
   if(loaded) db = loaded; // no-op when already set above, but harmless/idempotent
@@ -7292,7 +7530,7 @@ currentVehicleId = db.vehicles.length ? db.vehicles[0].id : null;
 </script>
 
 <!-- Supabase library -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 
 <!-- Supabase client + whole-database sync. The entire local `db` object
      (vehicles, tasks, users, logs, everything) is mirrored as one JSON blob
@@ -7302,7 +7540,13 @@ currentVehicleId = db.vehicles.length ? db.vehicles[0].id : null;
 <script>
   const SUPABASE_URL = 'https://kppqexhpjsdkuktbrgzd.supabase.co';
   const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtwcHFleGhwanNka3VrdGJyZ3pkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg3NDg0MDYsImV4cCI6MjEwNDMyNDQwNn0.5pZ1_DU8FRv54nsoRueaPNZx73odnm83p3O-AkWwgWY';
-  const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  // ถ้าโหลดไลบรารี Supabase ไม่ได้ (เน็ตหลุด/CDN ล่ม) ยังเปิดแอปด้วยข้อมูลในเครื่องได้ตามปกติ
+  // แล้วจะซิงก์ไม่ได้จนกว่าจะเปิดใหม่ตอนมีเน็ต (แทนที่จะเป็นหน้าจอว่างเปล่าแบบเดิม)
+  let supabaseClient = null;
+  try{
+    if(window.supabase && window.supabase.createClient) supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    else console.error('โหลดไลบรารี Supabase ไม่สำเร็จ — ใช้งานแบบออฟไลน์ด้วยข้อมูลในเครื่อง');
+  }catch(err){ console.error('สร้างการเชื่อมต่อ Supabase ไม่สำเร็จ', err); }
 
   initApp();
 </script>

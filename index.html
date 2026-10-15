@@ -2817,13 +2817,51 @@ function refreshAfterRemoteMerge(){
   render();
 }
 
+/* กันสองเครื่องบันทึกทับกัน (compare-and-swap)
+   ถ้าใน Supabase มีฟังก์ชัน get_app_state_v / sync_app_state_cas (ดูไฟล์
+   supabase/03_cas_sync.sql — เป็นฟังก์ชัน "เพิ่มใหม่" ไม่แตะของบอท LINE)
+   การส่งข้อมูลขึ้นจะสำเร็จก็ต่อเมื่อไม่มีใคร (เครื่องอื่นหรือบอท) บันทึกแทรก
+   เข้ามาระหว่างที่เครื่องนี้ดึง→รวม→ส่ง ถ้ามีแทรก จะดึงใหม่ รวมใหม่ แล้วส่งใหม่
+   ถ้ายังไม่ได้ติดตั้งฟังก์ชัน จะใช้วิธีเดิมโดยอัตโนมัติ */
+let casSyncAvailable = true;
+function isMissingRpc(err){ return !!(err && (err.code === 'PGRST202' || /could not find the function/i.test(err.message||''))); }
+async function pullStateVersioned(){
+  if(casSyncAvailable){
+    const { data, error } = await supabaseClient.rpc('get_app_state_v', { p_secret: APP_SYNC_SECRET });
+    if(!error) return { data: data ? data.data : null, version: data ? data.version : null };
+    if(!isMissingRpc(error)) return { error };
+    casSyncAvailable = false;
+  }
+  const { data, error } = await supabaseClient.rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
+  return error ? { error } : { data, version: null };
+}
+async function pushStateVersioned(snapshot, version){
+  if(casSyncAvailable && version){
+    const { data, error } = await supabaseClient.rpc('sync_app_state_cas', { p_secret: APP_SYNC_SECRET, p_data: snapshot, p_version: version });
+    if(!error) return (data && data.ok === false) ? { conflict: true } : { ok: true };
+    if(!isMissingRpc(error)) return { error };
+    casSyncAvailable = false;
+  }
+  const { error } = await supabaseClient.rpc('sync_app_state', { p_secret: APP_SYNC_SECRET, p_data: snapshot });
+  return error ? { error } : { ok: true };
+}
+
 async function _runDBSync(){
+  for(let attempt = 0; attempt < 5; attempt++){
+    const r = await _runDBSyncOnce();
+    if(r !== 'conflict') return;
+    await new Promise(res=> setTimeout(res, 300 + Math.random()*700)); // มีเครื่องอื่นบันทึกแทรก — รอแป๊บแล้วรวมใหม่
+  }
+  console.error('ซิงก์ไม่สำเร็จ: มีการบันทึกพร้อมกันหลายเครื่องต่อเนื่อง จะลองใหม่รอบถัดไป');
+}
+
+async function _runDBSyncOnce(){
   try{
     // 1) ดึงของล่าสุดบนเซิร์ฟเวอร์ — ถ้าดึงไม่ได้ (เน็ตหลุด) ห้ามส่งทับแบบไม่เช็ค
     //    ข้อมูลยังอยู่ในเครื่อง (IndexedDB) แล้ว ครั้งถัดไปที่บันทึก/ทุก 1 นาทีจะลองใหม่เอง
     let remote = null;
-    const { data: latest, error: pullErr } = await supabaseClient
-      .rpc('get_app_state', { p_secret: APP_SYNC_SECRET });
+    const pulled = await pullStateVersioned();
+    const latest = pulled.data, pullErr = pulled.error;
     if(pullErr){ console.error('ดึงข้อมูลล่าสุดก่อนซิงก์ไม่สำเร็จ — จะลองใหม่ภายหลัง', pullErr); return; }
     if(latest && Array.isArray(latest.vehicles)) remote = latest;
 
@@ -2838,9 +2876,9 @@ async function _runDBSync(){
     // 2) ส่งขึ้นเฉพาะเมื่อแท็บนี้มีของเปลี่ยนจริง (ไม่งั้นแค่รับของใหม่มา)
     const snapshot = cloneJSON(db);
     if(needPush){
-      const { error } = await supabaseClient
-        .rpc('sync_app_state', { p_secret: APP_SYNC_SECRET, p_data: snapshot });
-      if(error){ console.error('ซิงก์ข้อมูลขึ้น Supabase ไม่สำเร็จ', error); return; }
+      const pushed = await pushStateVersioned(snapshot, pulled.version);
+      if(pushed.conflict) return 'conflict';
+      if(pushed.error){ console.error('ซิงก์ข้อมูลขึ้น Supabase ไม่สำเร็จ', pushed.error); return; }
     }
     setSyncBase(snapshot);
     if(remoteApplied){
@@ -3489,8 +3527,34 @@ function deleteFleetGroup(groupId){
   render();
 }
 
-function saveVehicle(){
+function normalizePlate(s){ return String(s||'').replace(/[\s\-\.]/g,'').toLowerCase(); }
+let savingVehicle = false;
+async function saveVehicle(){
   if(!can('vehicles')){ alert('คุณไม่มีสิทธิ์จัดการรถ/ทะเบียน'); return; }
+  if(savingVehicle) return; // กันกดบันทึกซ้ำ
+  const nameCheck = document.getElementById('newVehicleName').value.trim();
+  if(!nameCheck){ alert('กรุณาใส่ชื่อ/ทะเบียนรถ'); return; }
+  const btn = document.getElementById('vehicleModalSubmit');
+  const btnLabel = btn ? btn.textContent : '';
+  savingVehicle = true;
+  if(btn){ btn.disabled = true; btn.textContent = 'กำลังตรวจสอบ...'; }
+  try{
+    // ดึงรายชื่อรถล่าสุดจากเครื่องอื่นก่อน จะได้เห็นคันที่เพิ่งเพิ่มจากอีกเครื่อง
+    try{ if(typeof supabaseClient !== 'undefined' && supabaseClient) await flushDBSyncNow(); }catch(e){}
+    const dup = db.vehicles.find(v=> v.id!==editingVehicleId && normalizePlate(v.name)===normalizePlate(nameCheck));
+    if(dup){
+      alert(`มีทะเบียน "${dup.name}" อยู่ในระบบแล้ว${dup.driver ? ' (คนขับ: '+dup.driver+')' : ''}\nไม่ต้องเพิ่มซ้ำ — เลือกคันนี้จากรายชื่อรถได้เลย`);
+      return;
+    }
+    _saveVehicleNow();
+    try{ await flushDBSyncNow(); }catch(e){}
+  }finally{
+    savingVehicle = false;
+    if(btn){ btn.disabled = false; btn.textContent = btnLabel; }
+  }
+}
+
+function _saveVehicleNow(){
   const name = document.getElementById('newVehicleName').value.trim();
   const driver = document.getElementById('newVehicleDriver').value.trim();
   const status = document.getElementById('newVehicleStatus').value;

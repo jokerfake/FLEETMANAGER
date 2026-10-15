@@ -321,6 +321,26 @@
 
   /* Stat-card row variant with 5 cards (dashboard) — reuses .summary/.sign */
   .summary.cols-5{ grid-template-columns:repeat(5,1fr); }
+  .summary.cols-3{ grid-template-columns:1fr 1fr 1.6fr; }
+  @media (max-width:880px){ .summary.cols-3{ grid-template-columns:1fr 1fr; } .summary.cols-3 .sign.info{ grid-column:1 / -1; } }
+  .sign .cost-break{ grid-column:2; font-size:11.5px; color:var(--muted); margin-top:3px; line-height:1.4; }
+  .insp-main{ margin-top:20px; }
+  .insp-main .insp-groups{ display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:12px; align-items:start; }
+  .insp-main .insp-groups .chk-group{ margin-bottom:0; }
+  .insp-month-head{ font-family:'Kanit'; font-weight:600; font-size:14px; margin-bottom:8px; }
+  .insp-round-row{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
+  .insp-round-card{ border:1px solid var(--steel); border-radius:12px; padding:10px 14px; background:var(--panel-2); }
+  .insp-round-card .t{ font-family:'Kanit'; font-weight:600; font-size:14px; }
+  .insp-round-card .s{ font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .insp-round-card a{ font-size:12px; color:var(--accent); }
+  .insp-round-card.done{ background:var(--ok-bg); border-color:color-mix(in srgb, var(--ok) 35%, transparent); }
+  .insp-round-card.bad{ background:var(--overdue-bg); border-color:color-mix(in srgb, var(--overdue) 35%, transparent); }
+  .insp-round-card.pending{ border-style:dashed; }
+  .insp-form-row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:600px){ .insp-form-row, .insp-round-row{ grid-template-columns:1fr; } }
+  .insp-round-toggle{ display:flex; gap:6px; }
+  .insp-round-toggle button{ flex:1; padding:9px 10px; border-radius:8px; border:1px solid var(--steel); background:var(--panel-2); color:var(--paper); font-family:'Kanit'; font-weight:600; cursor:pointer; }
+  .insp-round-toggle button.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
   @media (max-width:880px){ .summary.cols-5{ grid-template-columns:repeat(2,1fr); } }
   .sign.info::before{ content:'💰'; background:var(--accent-soft); }
   .sign.info .num{ color:var(--accent-2); font-size:19px; }
@@ -4333,7 +4353,7 @@ function buildMonthlySummary(vehicleId){
 // repair with a cost should show up even if nobody logged mileage that month.
 function getMonthlyCostRows(vehicleId){
   const byMonth = {};
-  const touch = (mk)=> byMonth[mk] || (byMonth[mk] = {monthKey:mk, oilCost:0, maintCost:0});
+  const touch = (mk)=> byMonth[mk] || (byMonth[mk] = {monthKey:mk, oilCost:0, maintCost:0, tireCost:0, fuelCost:0});
 
   db.oilLogs.filter(l=>l.vehicleId===vehicleId && l.cost!=null).forEach(l=>{
     touch(monthKey(l.date)).oilCost += l.cost;
@@ -4341,34 +4361,54 @@ function getMonthlyCostRows(vehicleId){
   db.maintenanceLogs.filter(l=>l.vehicleId===vehicleId && l.cost!=null).forEach(l=>{
     touch(monthKey(l.date)).maintCost += l.cost;
   });
+  (db.tireLogs||[]).filter(l=>l.vehicleId===vehicleId && l.cost!=null && l.date).forEach(l=>{
+    touch(monthKey(l.date)).tireCost += Number(l.cost)||0;
+  });
+  (db.shipments||[]).filter(sh=>sh.vehicleId===vehicleId && sh.fuelCost!=null && sh.date).forEach(sh=>{
+    touch(monthKey(sh.date)).fuelCost += Number(sh.fuelCost)||0;
+  });
 
   const rows = Object.values(byMonth)
-    .map(r=> ({...r, label: monthLabelTH(r.monthKey), total: r.oilCost + r.maintCost}))
+    .map(r=> ({...r, label: monthLabelTH(r.monthKey), total: r.oilCost + r.maintCost + r.tireCost + r.fuelCost}))
     .sort((a,b)=> a.monthKey.localeCompare(b.monthKey));
 
   const grandOil = rows.reduce((s,r)=> s + r.oilCost, 0);
   const grandMaint = rows.reduce((s,r)=> s + r.maintCost, 0);
-  return {rows, grandOil, grandMaint, grandTotal: grandOil + grandMaint};
+  const grandTire = rows.reduce((s,r)=> s + r.tireCost, 0);
+  const grandFuel = rows.reduce((s,r)=> s + r.fuelCost, 0);
+  return {rows, grandOil, grandMaint, grandTire, grandFuel, grandTotal: grandOil + grandMaint + grandTire + grandFuel};
+}
+
+// ค่าใช้จ่ายทั้งปี (ปฏิทิน) ของรถคันนี้ — รวมน้ำมันเครื่อง ยาง ซ่อมบำรุง น้ำมันเชื้อเพลิง
+function getYearCost(vehicleId, year){
+  const y = String(year);
+  const rows = getMonthlyCostRows(vehicleId).rows.filter(r=>r.monthKey.slice(0,4)===y);
+  const sum = k => rows.reduce((s,r)=> s + (r[k]||0), 0);
+  const out = {oil:sum('oilCost'), tire:sum('tireCost'), maint:sum('maintCost'), fuel:sum('fuelCost')};
+  out.total = out.oil + out.tire + out.maint + out.fuel;
+  return out;
 }
 
 function baht(n){ return n.toLocaleString('th-TH', {maximumFractionDigits:0}) + ' บาท'; }
 
 function renderMonthlyCostTable(vehicleId){
-  const {rows, grandOil, grandMaint, grandTotal} = getMonthlyCostRows(vehicleId);
+  const {rows, grandOil, grandMaint, grandTire, grandFuel, grandTotal} = getMonthlyCostRows(vehicleId);
   if(!rows.length){
-    return '<div class="hint">ยังไม่มีข้อมูลค่าใช้จ่าย — ใส่ค่าใช้จ่ายตอนบันทึกเปลี่ยนน้ำมันเครื่องหรือบันทึกซ่อมบำรุงอื่นๆ ได้เลย</div>';
+    return '<div class="hint">ยังไม่มีข้อมูลค่าใช้จ่าย — ใส่ค่าใช้จ่ายตอนบันทึกเปลี่ยนน้ำมันเครื่อง เปลี่ยนยาง ซ่อมบำรุง หรือส่งสินค้าได้เลย</div>';
   }
   return `
     <table class="summary-table">
       <thead>
-        <tr><th>เดือน</th><th>ค่าเปลี่ยนน้ำมันเครื่อง</th><th>ค่าซ่อมบำรุงอื่นๆ</th><th>รวม</th></tr>
+        <tr><th>เดือน</th><th>ค่าเปลี่ยนน้ำมันเครื่อง</th><th>ค่าเปลี่ยนยาง</th><th>ค่าซ่อมบำรุงอื่นๆ</th><th>ค่าน้ำมันเชื้อเพลิง</th><th>รวม</th></tr>
       </thead>
       <tbody>
         ${rows.map(r=>`
           <tr>
             <td>${r.label}</td>
             <td class="mono">${r.oilCost ? baht(r.oilCost) : '—'}</td>
+            <td class="mono">${r.tireCost ? baht(r.tireCost) : '—'}</td>
             <td class="mono">${r.maintCost ? baht(r.maintCost) : '—'}</td>
+            <td class="mono">${r.fuelCost ? baht(r.fuelCost) : '—'}</td>
             <td class="mono" style="font-weight:700; color:var(--accent);">${baht(r.total)}</td>
           </tr>`).join('')}
       </tbody>
@@ -4376,7 +4416,9 @@ function renderMonthlyCostTable(vehicleId){
         <tr style="border-top:2px solid var(--steel);">
           <td style="font-weight:700;">รวมทั้งหมด</td>
           <td class="mono" style="font-weight:700;">${baht(grandOil)}</td>
+          <td class="mono" style="font-weight:700;">${baht(grandTire)}</td>
           <td class="mono" style="font-weight:700;">${baht(grandMaint)}</td>
+          <td class="mono" style="font-weight:700;">${baht(grandFuel)}</td>
           <td class="mono" style="font-weight:700; color:var(--accent);">${baht(grandTotal)}</td>
         </tr>
       </tfoot>
@@ -4389,28 +4431,30 @@ function renderMonthlyCostTable(vehicleId){
 function renderMonthlyCostSummary(vehicleId){
   const {rows} = getMonthlyCostRows(vehicleId);
   if(!rows.length){
-    return '<div class="hint">ยังไม่มีข้อมูลค่าใช้จ่าย — ใส่ค่าใช้จ่ายตอนบันทึกเปลี่ยนน้ำมันเครื่องหรือบันทึกซ่อมบำรุงอื่นๆ ได้เลย</div>';
+    return '<div class="hint">ยังไม่มีข้อมูลค่าใช้จ่าย — ใส่ค่าใช้จ่ายตอนบันทึกเปลี่ยนน้ำมันเครื่อง เปลี่ยนยาง ซ่อมบำรุง หรือส่งสินค้าได้เลย</div>';
   }
   const recent = rows.slice(-4);
   const recentTotal = recent.reduce((s,r)=> s + r.total, 0);
   return `
     <table class="summary-table">
       <thead>
-        <tr><th>เดือน</th><th>ค่าเปลี่ยนน้ำมันเครื่อง</th><th>ค่าซ่อมบำรุงอื่นๆ</th><th>รวม</th></tr>
+        <tr><th>เดือน</th><th>ค่าเปลี่ยนน้ำมันเครื่อง</th><th>ค่าเปลี่ยนยาง</th><th>ค่าซ่อมบำรุงอื่นๆ</th><th>ค่าน้ำมันเชื้อเพลิง</th><th>รวม</th></tr>
       </thead>
       <tbody>
         ${recent.map(r=>`
           <tr>
             <td>${r.label}</td>
             <td class="mono">${r.oilCost ? baht(r.oilCost) : '—'}</td>
+            <td class="mono">${r.tireCost ? baht(r.tireCost) : '—'}</td>
             <td class="mono">${r.maintCost ? baht(r.maintCost) : '—'}</td>
+            <td class="mono">${r.fuelCost ? baht(r.fuelCost) : '—'}</td>
             <td class="mono" style="font-weight:700; color:var(--accent);">${baht(r.total)}</td>
           </tr>`).join('')}
       </tbody>
       <tfoot>
         <tr style="border-top:2px solid var(--steel);">
           <td style="font-weight:700;">รวม ${recent.length} เดือนล่าสุด</td>
-          <td></td><td></td>
+          <td></td><td></td><td></td><td></td>
           <td class="mono" style="font-weight:700; color:var(--accent);">${baht(recentTotal)}</td>
         </tr>
       </tfoot>
@@ -4620,6 +4664,40 @@ let checklistNotes = '';
 let checklistDate = todayStr();
 let checklistPhotos = [];
 let checklistEditId = null; // set when editing an existing history entry instead of logging a new one
+let checklistRound = null;  // 1 | 2 — ตรวจครั้งที่ของเดือน (null = เลือกให้อัตโนมัติ)
+
+/* ตรวจสภาพรถประจำเดือน: เดือนละ 2 ครั้ง. บันทึกเก่าที่ยังไม่มี round จะนับ
+   ตามลำดับวันที่ในเดือนนั้น (ครั้งแรก = 1, ถัดไป = 2) */
+function inspectionLogsInMonth(vehicleId, mk){
+  return db.logs.filter(l=>l.vehicleId===vehicleId && l.date && l.date.slice(0,7)===mk)
+    .sort((a,b)=> a.date.localeCompare(b.date) || (a.createdAt||'').localeCompare(b.createdAt||''));
+}
+function inspectionRoundOf(log){
+  if(log.round===1 || log.round===2) return log.round;
+  const same = inspectionLogsInMonth(log.vehicleId, log.date.slice(0,7));
+  const taken = new Set(same.filter(l=>l.round===1||l.round===2).map(l=>l.round));
+  let n = 0;
+  for(const l of same){
+    if(l.round===1 || l.round===2) continue;
+    n++;
+    while(taken.has(n)) n++;
+    if(l.id===log.id) return Math.min(n, 2);
+  }
+  return 1;
+}
+function inspectionRoundsForMonth(vehicleId, mk){
+  const res = {1:null, 2:null};
+  inspectionLogsInMonth(vehicleId, mk).forEach(l=>{
+    const r = inspectionRoundOf(l);
+    res[r] = l; // ถ้ามีซ้ำ ใช้รายการล่าสุด
+  });
+  return res;
+}
+function defaultChecklistRound(){
+  const r = inspectionRoundsForMonth(currentVehicleId, (checklistDate||todayStr()).slice(0,7));
+  return r[1] ? 2 : 1;
+}
+function setChecklistRound(n){ checklistRound = n; renderChecklistPanel(); }
 
 /* ---------------- PM schedule category filter (dashboard) ---------------- */
 let pmFilterCategory = 'ทั้งหมด';
@@ -4671,6 +4749,7 @@ function startEditChecklistLog(logId){
   checklistNotes = log.notes || '';
   checklistDate = log.date;
   checklistPhotos = (log.photos || []).slice();
+  checklistRound = inspectionRoundOf(log);
   renderChecklistPanel();
   const panel = document.getElementById('checklistPanel');
   if(panel) panel.scrollIntoView({behavior:'smooth', block:'start'});
@@ -4678,6 +4757,7 @@ function startEditChecklistLog(logId){
 
 function cancelChecklistEdit(){
   checklistEditId = null;
+  checklistRound = null;
   checklistState = {};
   checklistNotes = '';
   checklistDate = todayStr();
@@ -4703,6 +4783,16 @@ function saveChecklistLog(){
   const notes = checklistNotes.trim();
   const date = checklistDate || todayStr();
   const photos = checklistPhotos.slice();
+  const round = checklistRound || defaultChecklistRound();
+
+  // ครั้งที่นี้ของเดือนนี้บันทึกไปแล้ว → ถามก่อนว่าจะบันทึกทับรายการเดิมไหม
+  if(!checklistEditId){
+    const existing = inspectionRoundsForMonth(currentVehicleId, date.slice(0,7))[round];
+    if(existing){
+      if(!confirm(`ตรวจครั้งที่ ${round} ของเดือนนี้บันทึกไปแล้ว (วันที่ ${existing.date})\nต้องการบันทึกทับรายการเดิมหรือไม่?`)) return;
+      checklistEditId = existing.id;
+    }
+  }
 
   if(checklistEditId){
     const log = db.logs.find(l=>l.id===checklistEditId);
@@ -4712,21 +4802,23 @@ function saveChecklistLog(){
       log.failCount = failCount;
       log.notes = notes;
       log.photos = photos;
+      log.round = round;
       // km stays as originally recorded — editing corrects the checklist, not the odometer reading
     }
     logActivity('แก้ไขบันทึกตรวจสภาพ', `${v.name} (${date})`);
   }else{
     db.logs.push({
       id: uid(), vehicleId: currentVehicleId, date,
-      currentKm: v.currentKm, items, failCount, notes, photos,
+      currentKm: v.currentKm, items, failCount, notes, photos, round,
       createdAt: new Date().toISOString()
     });
     logKmReading(currentVehicleId, date, v.currentKm);
-    logActivity('เพิ่มบันทึกตรวจสภาพ', `${v.name}${failCount ? ` — พบจุดผิดปกติ ${failCount} รายการ` : ''} (${date})`);
+    logActivity('เพิ่มบันทึกตรวจสภาพ', `${v.name} ครั้งที่ ${round}${failCount ? ` — พบจุดผิดปกติ ${failCount} รายการ` : ''} (${date})`);
   }
 
   saveDB();
   checklistEditId = null;
+  checklistRound = null;
   checklistState = {};
   checklistNotes = '';
   checklistDate = todayStr();
@@ -4976,9 +5068,10 @@ function render(){
     pmFilterCategory = 'ทั้งหมด'; // stale filter from a previous vehicle whose categories differ
   }
 
-  const thisMonthKey = monthKey(todayStr());
-  const costThisMonth = getMonthlyCostRows(v.id).rows.find(r=>r.monthKey===thisMonthKey);
-  const costThisMonthTotal = costThisMonth ? costThisMonth.total : 0;
+  const thisYear = parseInt(todayStr().slice(0,4));
+  const yearCost = getYearCost(v.id, thisYear);
+  const monthRounds = inspectionRoundsForMonth(v.id, todayStr().slice(0,7));
+  const roundsDone = (monthRounds[1]?1:0) + (monthRounds[2]?1:0);
 
   const oilAlert = oilChangeAlert(v, tasks);
   const printDate = new Date().toLocaleDateString('th-TH', {year:'numeric', month:'long', day:'numeric'});
@@ -5047,44 +5140,26 @@ function render(){
       </div>
     </div>` : ''}
 
-    <div class="summary cols-5" style="margin:20px 0 0;">
+    <div class="summary cols-3" style="margin:20px 0 0;">
       <div class="sign">
         <div class="num">${v.currentKm!=null ? v.currentKm.toLocaleString() : '-'}</div>
         <div class="lbl">เลขไมล์สะสม (กม.)</div>
       </div>
-      <div class="sign overdue">
-        <div class="num">${overdueCount}</div>
-        <div class="lbl">เกินกำหนด</div>
-      </div>
-      <div class="sign soon">
-        <div class="num">${soonCount}</div>
-        <div class="lbl">ใกล้ถึงกำหนด</div>
-      </div>
-      <div class="sign ok">
-        <div class="num">${okCount>0 && overdueCount===0 && soonCount===0 ? '✓' : okCount}</div>
-        <div class="lbl">${overdueCount===0 && soonCount===0 ? 'ปกติทั้งหมด' : 'ปกติ'}</div>
+      <div class="sign ${roundsDone===2 ? 'ok' : 'soon'}">
+        <div class="num">${roundsDone}/2</div>
+        <div class="lbl">ตรวจสภาพเดือนนี้ (ครั้ง)</div>
       </div>
       <div class="sign info">
-        <div class="num">${baht(costThisMonthTotal)}</div>
-        <div class="lbl">ค่าใช้จ่ายเดือนนี้</div>
+        <div class="num">${baht(yearCost.total)}</div>
+        <div class="lbl">ค่าใช้จ่ายทั้งหมด ปี ${thisYear+543}</div>
+        <div class="cost-break">น้ำมันเครื่อง ${baht(yearCost.oil)} · ยาง ${baht(yearCost.tire)} · ซ่อม ${baht(yearCost.maint)}${yearCost.fuel ? ' · น้ำมันเชื้อเพลิง '+baht(yearCost.fuel) : ''}</div>
       </div>
     </div>
 
-    <div class="columns">
-      <div class="panel-block">
-        <h2>แผนบำรุงรักษาป้องกัน (PM Schedule) ${can('tasks') ? `<button class="btn ghost small" onclick="openTaskModal()">+ เพิ่มรายการ</button>` : ''}</h2>
-        <div class="hint">เรียงตามสถานะ: เกินกำหนด → ใกล้ถึงกำหนด → ปกติ — แตะหมวดหมู่ด้านล่างเพื่อกรองรายการ</div>
-        <div class="fleet-tab-bar" style="margin-bottom:14px;">
-          ${pmCategories.map(c=>`<button class="fleet-tab-btn ${pmFilterCategory===c.name?'active':''}" data-cat="${escapeHtml(c.name)}" onclick="setPmFilterCategory(this.dataset.cat)">${escapeHtml(c.name)} (${c.count})</button>`).join('')}
-        </div>
-        <div id="taskList"></div>
-      </div>
-
-      <div class="panel-block">
-        <h2>ตรวจสภาพก่อนออกรถ <span class="fleet-badge active" style="margin-left:4px;">Pre-Trip</span></h2>
-        <div class="hint">เช็คลิสต์ง่ายๆ ที่ตรวจได้เองทุกวันก่อนใช้งาน — <a href="#" onclick="scrollToSection('historyPanelBlock'); return false;" style="color:var(--accent);">ดูประวัติการตรวจย้อนหลัง</a></div>
-        <div id="checklistPanel"></div>
-      </div>
+    <div class="panel-block insp-main" id="inspectionMain">
+      <h2>ตรวจสภาพรถประจำเดือน <span class="fleet-badge active" style="margin-left:4px;">เดือนละ 2 ครั้ง</span></h2>
+      <div class="hint">เลือกครั้งที่ตรวจ แล้วกดผ่าน/ไม่ผ่านทีละรายการ — <a href="#" onclick="scrollToSection('historyPanelBlock'); return false;" style="color:var(--accent);">ดูประวัติการตรวจย้อนหลัง</a></div>
+      <div id="checklistPanel"></div>
     </div>
 
     <div class="panel-block" style="margin-top:20px;">
@@ -5095,71 +5170,59 @@ function render(){
 
     <div class="panel-block" style="margin-top:20px;">
       <h2>ค่าใช้จ่ายรายเดือน</h2>
-      <div class="hint">สรุป 4 เดือนล่าสุด รวมค่าเปลี่ยนน้ำมันเครื่องและค่าซ่อมบำรุงอื่นๆ ของรถคันนี้ — ดูย้อนหลังทั้งหมดได้ด้านล่าง</div>
+      <div class="hint">สรุป 4 เดือนล่าสุด รวมค่าน้ำมันเครื่อง ยาง ซ่อมบำรุง และน้ำมันเชื้อเพลิง (จากบันทึกส่งสินค้า) ของรถคันนี้ — ดูย้อนหลังทั้งหมดได้ด้านล่าง</div>
       ${renderMonthlyCostSummary(v.id)}
     </div>
 
     <div class="panel-block" style="margin-top:20px;" id="historyPanelBlock">
-      <h2>ประวัติการตรวจสภาพล่าสุด</h2>
+      <h2>ประวัติการตรวจสภาพรถประจำเดือน</h2>
       <div id="historyPanel"></div>
     </div>
   `;
-
-  // sort order
-  const order = {overdue:0, soon:1, ok:2};
-  statuses.sort((a,b)=>order[a.status]-order[b.status]);
-  const visibleStatuses = pmFilterCategory==='ทั้งหมด' ? statuses : statuses.filter(s=>s.t.category===pmFilterCategory);
-
-  document.getElementById('taskList').innerHTML = visibleStatuses.map(s=>{
-    const t = s.t;
-    let detail = [];
-    if(t.intervalKm) detail.push(`ทุก ${t.intervalKm.toLocaleString()} กม.`);
-    if(t.intervalDays) detail.push(`ทุก ${t.intervalDays} วัน`);
-    let remainLabel = '';
-    if(t.intervalKm){
-      remainLabel = s.kmLeft<=0 ? `เกิน ${Math.abs(s.kmLeft).toLocaleString()} กม.` : `อีก ${s.kmLeft.toLocaleString()} กม.`;
-    }else if(t.intervalDays){
-      remainLabel = s.daysLeft<=0 ? `เกิน ${Math.abs(s.daysLeft)} วัน` : `อีก ${s.daysLeft} วัน`;
-    }
-    const pctKm = t.intervalKm ? ((t.intervalKm - s.kmLeft)/t.intervalKm)*100 : null;
-    const pctDay = t.intervalDays ? ((t.intervalDays - s.daysLeft)/t.intervalDays)*100 : null;
-    const pct = Math.max(0, Math.min(100, Math.max(pctKm||0, pctDay||0)));
-    return `
-      <div class="pm-card ${s.status}">
-        <div class="pm-card-body">
-          <div class="pm-card-top">
-            <span class="pm-cat-pill">${escapeHtml(t.category)}</span>
-            <span class="status-pill ${s.status}">${escapeHtml(remainLabel)}</span>
-          </div>
-          <div class="name">${escapeHtml(t.name)}</div>
-          <div class="detail">${detail.join(' &nbsp;|&nbsp; ')}</div>
-          <div class="pm-progress-track"><div class="pm-progress-fill ${s.status}" style="width:${pct}%"></div></div>
-        </div>
-        <div class="pm-actions">
-          <button class="btn small ${s.status==='overdue' ? 'danger' : ''}" onclick="markDone('${t.id}')">ทำแล้ว</button>
-          ${can('tasks') ? `<button class="btn ghost small" onclick="openEditTaskModal('${t.id}')" title="แก้ไขรอบ">⚙️</button>` : ''}
-          ${(can('tasks') && can('deleteRecords')) ? `<button class="btn ghost small" onclick="removeTask('${t.id}')" title="ลบรายการนี้">🗑️</button>` : ''}
-        </div>
-      </div>`;
-  }).join('') || '<div class="hint">ยังไม่มีรายการในหมวดนี้</div>';
 
   renderChecklistPanel();
   renderHistoryPanel();
   renderMaintenanceLogPanel();
 }
 
+function renderInspectionMonthStatus(){
+  const mk = (checklistDate||todayStr()).slice(0,7);
+  const r = inspectionRoundsForMonth(currentVehicleId, mk);
+  const card = n=>{
+    const l = r[n];
+    if(!l) return `<div class="insp-round-card pending"><div class="t">ตรวจครั้งที่ ${n}</div><div class="s">ยังไม่ได้ตรวจ</div></div>`;
+    const bad = l.failCount>0;
+    return `<div class="insp-round-card ${bad?'bad':'done'}">
+      <div class="t">ตรวจครั้งที่ ${n} ${bad?'⚠️':'✅'}</div>
+      <div class="s">${formatThaiDateShort(l.date)} · ${bad ? l.failCount+' รายการไม่ผ่าน' : 'ผ่านทั้งหมด'}</div>
+      <a href="#" onclick="startEditChecklistLog('${l.id}'); return false;">ดู/แก้ไข</a>
+    </div>`;
+  };
+  return `<div class="insp-month-head">เดือน${monthLabelTH(mk)}</div><div class="insp-round-row">${card(1)}${card(2)}</div>`;
+}
+
 function renderChecklistPanel(){
   const panel = document.getElementById('checklistPanel');
   if(!panel) return;
+  const curRound = checklistRound || defaultChecklistRound();
   panel.innerHTML = `
     ${checklistEditId ? `<div class="hint" style="background:var(--panel-2); border:1px solid var(--steel-soft); border-radius:8px; padding:8px 10px; margin-bottom:10px;">
       ✏️ กำลังแก้ไขบันทึกวันที่ ${checklistDate} — <a href="#" onclick="cancelChecklistEdit(); return false;" style="color:var(--accent);">ยกเลิกการแก้ไข</a>
     </div>` : ''}
-    <div class="field">
-      <label>วันที่ตรวจ</label>
-      <input type="date" id="chkDate" value="${checklistDate}" onchange="checklistDate=this.value">
+    ${renderInspectionMonthStatus()}
+    <div class="insp-form-row">
+      <div class="field">
+        <label>วันที่ตรวจ</label>
+        <input type="date" id="chkDate" value="${checklistDate}" onchange="checklistDate=this.value; if(!checklistEditId){ checklistRound=null; } renderChecklistPanel();">
+      </div>
+      <div class="field">
+        <label>ตรวจครั้งที่</label>
+        <div class="insp-round-toggle">
+          ${[1,2].map(n=>`<button type="button" class="${curRound===n?'active':''}" onclick="setChecklistRound(${n})">ครั้งที่ ${n}</button>`).join('')}
+        </div>
+      </div>
     </div>
-  ` + PRETRIP_CHECKLIST.map((grp, gi)=>`
+  <div class="insp-groups">` + PRETRIP_CHECKLIST.map((grp, gi)=>`
     <div class="chk-group">
       <div class="chk-group-title">${escapeHtml(grp.group)}</div>
       ${grp.items.map((item, ii)=>{
@@ -5175,13 +5238,13 @@ function renderChecklistPanel(){
         </div>`;
       }).join('')}
     </div>
-  `).join('') + `
+  `).join('') + `</div>
     <div class="field" style="margin-top:10px;">
       <label>หมายเหตุ (ถ้ามี)</label>
       <textarea id="chkNotes" oninput="checklistNotes=this.value" placeholder="เช่น ยางหลังขวาสึกเยอะ ควรเปลี่ยนเร็วๆ นี้">${escapeHtml(checklistNotes)}</textarea>
     </div>
     <div class="field">
-      <label>ภาพถ่ายสภาพรถประจำวัน (${checklistPhotos.length} รูป)</label>
+      <label>ภาพถ่ายสภาพรถ (${checklistPhotos.length} รูป)</label>
       <div class="photo-tile-grid">
         ${checklistPhotos.map((p,i)=>`
           <div class="photo-tile">
@@ -5195,7 +5258,7 @@ function renderChecklistPanel(){
         </label>
       </div>
     </div>
-    <button class="btn" style="width:100%;" onclick="saveChecklistLog()">${checklistEditId ? 'บันทึกการแก้ไข' : 'บันทึกผลตรวจวันนี้'}</button>
+    <button class="btn" style="width:100%;" onclick="saveChecklistLog()">${checklistEditId ? `บันทึกการแก้ไข (ครั้งที่ ${curRound})` : `บันทึกผลตรวจครั้งที่ ${curRound}`}</button>
   `;
 }
 
@@ -5342,7 +5405,7 @@ function renderHistoryPanel(){
   panel.innerHTML = logs.map(l=>`
     <details style="border-bottom:1px solid var(--steel-soft); padding: 6px 0;">
       <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:10px; padding:4px 0; font-size:12.5px;">
-        <span style="color:var(--muted);">${l.date} · ไมล์ ${l.currentKm!=null ? l.currentKm.toLocaleString() : '-'} กม.${l.notes ? ' · ' + escapeHtml(l.notes.length>40 ? l.notes.slice(0,40)+'…' : l.notes) : ''}${l.photos && l.photos.length ? ' 📎' : ''}</span>
+        <span style="color:var(--muted);"><strong style="color:var(--paper);">ครั้งที่ ${inspectionRoundOf(l)}</strong> · ${l.date} · ไมล์ ${l.currentKm!=null ? l.currentKm.toLocaleString() : '-'} กม.${l.notes ? ' · ' + escapeHtml(l.notes.length>40 ? l.notes.slice(0,40)+'…' : l.notes) : ''}${l.photos && l.photos.length ? ' 📎' : ''}</span>
         <span style="${l.failCount>0 ? 'color:var(--overdue); font-weight:600;' : 'color:var(--muted);'}">${l.failCount>0 ? l.failCount+' รายการไม่ผ่าน' : 'ผ่านทั้งหมด'}</span>
       </summary>
       <div style="margin-top:10px; padding-left:2px;">

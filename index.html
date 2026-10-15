@@ -4401,8 +4401,13 @@ function buildMonthlySummary(vehicleId){
 
     let baseline = readings[0].km;
     let baselineDate = null; // null = no logged oil change yet, using tracking-start km
-    oilLogs.forEach(o=>{ if(o.date <= r.date){ baseline = o.km; baselineDate = o.date; } });
-    const sinceOil = r.km - baseline;
+    // นับการเปลี่ยนน้ำมันเครื่องทั้งเดือน (ถึงวันสุดท้ายของเดือน) ไม่ใช่แค่ถึงวันที่จดไมล์ครั้งสุดท้าย
+    // — เดิมถ้าเปลี่ยนน้ำมันหลังวันจดไมล์ครั้งสุดท้ายของเดือน (เช่น จดไมล์ 8 ก.ย. เปลี่ยน 10 ก.ย.)
+    // จะไม่ถูกนับในเดือนนั้น แล้วไปโผล่เดือนถัดไปแทน
+    const monthEnd = mk + '-31';
+    oilLogs.forEach(o=>{ if(o.date <= monthEnd){ baseline = o.km; baselineDate = o.date; } });
+    // ถ้าเปลี่ยนน้ำมันหลังเลขไมล์ที่จดไว้ (เลขไมล์ตอนเปลี่ยนมากกว่า) ถือว่าเพิ่งเปลี่ยน = 0
+    const sinceOil = Math.max(0, r.km - baseline);
     const remainingKm = interval - sinceOil;
     const status = sinceOil >= interval ? 'overdue' : (remainingKm <= db.settings.warningKm ? 'soon' : 'ok');
 

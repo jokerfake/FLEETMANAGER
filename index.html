@@ -3619,6 +3619,7 @@ function onVehicleChange(){
   checklistNotes = '';
   checklistDate = todayStr();
   checklistPhotos = [];
+  checklistKm = null;
   pmFilterCategory = 'ทั้งหมด';
   render();
 }
@@ -4732,6 +4733,7 @@ let checklistState = {};
 let checklistNotes = '';
 let checklistDate = todayStr();
 let checklistPhotos = [];
+let checklistKm = null; // เลขไมล์ตอนตรวจ (null = ใช้เลขไมล์ปัจจุบันของรถ)
 let checklistEditId = null; // set when editing an existing history entry instead of logging a new one
 let checklistRound = null;  // 1 | 2 — ตรวจครั้งที่ของเดือน (null = เลือกให้อัตโนมัติ)
 
@@ -4818,6 +4820,7 @@ function startEditChecklistLog(logId){
   checklistNotes = log.notes || '';
   checklistDate = log.date;
   checklistPhotos = (log.photos || []).slice();
+  checklistKm = log.currentKm!=null ? log.currentKm : null;
   checklistRound = inspectionRoundOf(log);
   renderChecklistPanel();
   const panel = document.getElementById('checklistPanel');
@@ -4831,6 +4834,7 @@ function cancelChecklistEdit(){
   checklistNotes = '';
   checklistDate = todayStr();
   checklistPhotos = [];
+  checklistKm = null;
   renderChecklistPanel();
 }
 
@@ -4853,6 +4857,9 @@ function saveChecklistLog(){
   const date = checklistDate || todayStr();
   const photos = checklistPhotos.slice();
   const round = checklistRound || defaultChecklistRound();
+  const kmRaw = document.getElementById('chkKm') ? document.getElementById('chkKm').value : '';
+  const inspKm = kmRaw === '' ? null : parseInt(kmRaw);
+  if(inspKm!=null && (isNaN(inspKm) || inspKm < 0)){ alert('เลขไมล์ไม่ถูกต้อง'); return; }
 
   // ครั้งที่นี้ของเดือนนี้บันทึกไปแล้ว → ถามก่อนว่าจะบันทึกทับรายการเดิมไหม
   if(!checklistEditId){
@@ -4872,16 +4879,17 @@ function saveChecklistLog(){
       log.notes = notes;
       log.photos = photos;
       log.round = round;
+      if(inspKm!=null) log.currentKm = inspKm; // แก้เฉพาะเลขไมล์ในบันทึกตรวจนี้ ไม่แตะบันทึกไมล์รายสัปดาห์
       // km stays as originally recorded — editing corrects the checklist, not the odometer reading
     }
     logActivity('แก้ไขบันทึกตรวจสภาพ', `${v.name} (${date})`);
   }else{
     db.logs.push({
       id: uid(), vehicleId: currentVehicleId, date,
-      currentKm: v.currentKm, items, failCount, notes, photos, round,
+      currentKm: inspKm!=null ? inspKm : v.currentKm, items, failCount, notes, photos, round,
       createdAt: new Date().toISOString()
     });
-    logKmReading(currentVehicleId, date, v.currentKm);
+    logKmReading(currentVehicleId, date, inspKm!=null ? inspKm : v.currentKm);
     logActivity('เพิ่มบันทึกตรวจสภาพ', `${v.name} ครั้งที่ ${round}${failCount ? ` — พบจุดผิดปกติ ${failCount} รายการ` : ''} (${date})`);
   }
 
@@ -4892,6 +4900,7 @@ function saveChecklistLog(){
   checklistNotes = '';
   checklistDate = todayStr();
   checklistPhotos = [];
+  checklistKm = null;
   render();
 }
 
@@ -5274,6 +5283,7 @@ function renderChecklistPanel(){
   const panel = document.getElementById('checklistPanel');
   if(!panel) return;
   const curRound = checklistRound || defaultChecklistRound();
+  const curVehicleForChk = db.vehicles.find(v=>v.id===currentVehicleId);
   panel.innerHTML = `
     ${checklistEditId ? `<div class="hint" style="background:var(--panel-2); border:1px solid var(--steel-soft); border-radius:8px; padding:8px 10px; margin-bottom:10px;">
       ✏️ กำลังแก้ไขบันทึกวันที่ ${checklistDate} — <a href="#" onclick="cancelChecklistEdit(); return false;" style="color:var(--accent);">ยกเลิกการแก้ไข</a>
@@ -5290,6 +5300,11 @@ function renderChecklistPanel(){
           ${[1,2].map(n=>`<button type="button" class="${curRound===n?'active':''}" onclick="setChecklistRound(${n})">ครั้งที่ ${n}</button>`).join('')}
         </div>
       </div>
+    </div>
+    <div class="field">
+      <label>เลขไมล์ตอนตรวจ (กม.)</label>
+      <input type="number" id="chkKm" min="0" value="${checklistKm!=null ? checklistKm : (curVehicleForChk && curVehicleForChk.currentKm!=null ? curVehicleForChk.currentKm : '')}" oninput="checklistKm = this.value==='' ? null : parseInt(this.value)" placeholder="เช่น 319052">
+      <div class="hint" style="margin:4px 0 0;">${checklistEditId ? 'แก้ได้เลย — เปลี่ยนเฉพาะเลขไมล์ของบันทึกตรวจนี้' : 'ดึงเลขไมล์ปัจจุบันของรถมาให้ ถ้าไม่ตรงกับหน้าปัดให้แก้ก่อนบันทึก'}</div>
     </div>
   <div class="insp-groups">` + PRETRIP_CHECKLIST.map((grp, gi)=>`
     <div class="chk-group">

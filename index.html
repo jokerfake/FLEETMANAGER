@@ -4259,6 +4259,9 @@ function taskStatus(t, v){
 }
 
 /* ---------------- Oil change alert ---------------- */
+// ปิดแบนเนอร์เตือนเปลี่ยนน้ำมันเครื่องบนแดชบอร์ดไว้ก่อน (ผู้ตรวจสับสน) — เปลี่ยนเป็น true เพื่อเปิดกลับ
+const SHOW_OIL_ALERT_BANNER = false;
+
 function oilChangeAlert(v, tasks){
   // Match the engine-oil task specifically (default template name, or any custom
   // task the user named containing "น้ำมันเครื่อง" — excludes brake fluid etc.)
@@ -5209,7 +5212,7 @@ function render(){
       </div>
     </div>` : ''}
 
-    ${oilAlert ? `
+    ${(SHOW_OIL_ALERT_BANNER && oilAlert) ? `
     <div class="oil-banner ${oilAlert.status}">
       <div class="icon">${oilAlert.status === 'overdue' ? '🛑' : '⚠️'}</div>
       <div class="msg">

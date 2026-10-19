@@ -4381,12 +4381,51 @@ function lastInspectionLabel(vehicleId){
 // For each vehicle: one row per calendar month that has a km reading, showing
 // the month-end odometer, distance driven that month, and km accumulated
 // since the last logged oil change (vs. the oil task's own interval).
+/* ---------------- ไมล์ตีกลับรอบใหม่ (หน้าปัด 6 หลัก เกิน 999,999 แล้วกลับเป็น 0) ----------------
+   ข้อมูลยังเก็บ "เลขตามหน้าปัด" เหมือนเดิม (บอท LINE ใช้เลขนี้เทียบ) — แต่เวลาคำนวณ
+   ระยะทาง/รอบน้ำมันเครื่อง/ยาง โปรแกรมจะบวก 1,000,000 ให้เองหลังจุดที่ไมล์ตีกลับ
+   ตรวจจาก: ไมล์ครั้งก่อน ≥ 900,000 แล้วครั้งถัดไปต่ำกว่า 200,000
+   ถ้าเคยกรอกเลขรวมเกินล้านไว้แล้ว (เช่น 1,002,596) ก็ใช้ได้ ไม่บวกซ้ำ */
+const ODO_WRAP = 1000000;
+function odoSeries(vehicleId){
+  const readings = db.kmLogs.filter(l=>l.vehicleId===vehicleId && l.km!=null && l.date)
+    .slice().sort((a,b)=> a.date.localeCompare(b.date));
+  let prev = null;
+  return readings.map(r=>{
+    const raw = Number(r.km);
+    let eff = raw;
+    if(prev!=null && raw < ODO_WRAP){
+      const base = Math.floor(prev / ODO_WRAP) * ODO_WRAP;
+      eff = raw + base;
+      if(prev - base >= 900000 && raw < 200000) eff = raw + base + ODO_WRAP; // ตีกลับรอบใหม่
+    }
+    prev = eff;
+    return {...r, rawKm: raw, km: eff};
+  });
+}
+// แปลงเลขไมล์ตามหน้าปัด (ของบันทึกอื่น เช่น เปลี่ยนน้ำมัน/ยาง) ให้เป็นเลขสะสมจริง ณ วันนั้น
+function odoEffectiveAt(series, date, raw){
+  if(raw==null || raw==='' || isNaN(Number(raw))) return raw;
+  raw = Number(raw);
+  if(raw >= ODO_WRAP || !series.length) return raw;
+  let ref = null;
+  for(const r of series){ if(r.date <= date) ref = r.km; else { if(ref==null) ref = r.km; break; } }
+  if(ref==null) return raw;
+  const base = Math.floor(ref / ODO_WRAP) * ODO_WRAP;
+  const cands = [raw + base - ODO_WRAP, raw + base, raw + base + ODO_WRAP].filter(x=>x>=0);
+  return cands.reduce((a,b)=> Math.abs(b-ref) < Math.abs(a-ref) ? b : a);
+}
+function odoCurrentKm(v){
+  const series = odoSeries(v.id);
+  return odoEffectiveAt(series, '9999-12-31', v.currentKm||0);
+}
+
 function buildMonthlySummary(vehicleId){
   const tasks = db.tasks.filter(t=>t.vehicleId===vehicleId);
   const oilTask = tasks.find(t=>t.name.includes('น้ำมันเครื่อง'));
   const interval = (oilTask && oilTask.intervalKm) || 20000;
 
-  const readings = db.kmLogs.filter(l=>l.vehicleId===vehicleId).sort((a,b)=>a.date.localeCompare(b.date));
+  const readings = odoSeries(vehicleId); // เลขสะสมจริง (รองรับไมล์ตีกลับเกินล้าน)
   if(!readings.length) return {rows:[], interval};
 
   const byMonth = {};
@@ -4395,7 +4434,13 @@ function buildMonthlySummary(vehicleId){
     if(!byMonth[mk] || r.date >= byMonth[mk].date) byMonth[mk] = r;
   });
   const monthKeys = Object.keys(byMonth).sort();
-  const oilLogs = db.oilLogs.filter(l=>l.vehicleId===vehicleId).sort((a,b)=>a.date.localeCompare(b.date));
+  const oilLogs = db.oilLogs.filter(l=>l.vehicleId===vehicleId).sort((a,b)=>a.date.localeCompare(b.date))
+    .map(o=>{
+      const eff = odoEffectiveAt(readings, o.date, o.km);
+      // เลขไมล์ในบันทึกเปลี่ยนน้ำมันห่างจากเลขไมล์รายสัปดาห์ช่วงนั้นเกิน 30,000 กม. = น่าจะกรอกผิด
+      let ref = null; for(const r of readings){ if(r.date <= o.date) ref = r.km; else { if(ref==null) ref = r.km; break; } }
+      return {...o, km: eff, suspect: ref!=null && eff!=null && Math.abs(eff - ref) > 30000};
+    });
 
   let prevKm = null;
   const rows = monthKeys.map(mk=>{
@@ -4405,17 +4450,18 @@ function buildMonthlySummary(vehicleId){
 
     let baseline = readings[0].km;
     let baselineDate = null; // null = no logged oil change yet, using tracking-start km
+    let baselineSuspect = false;
     // นับการเปลี่ยนน้ำมันเครื่องทั้งเดือน (ถึงวันสุดท้ายของเดือน) ไม่ใช่แค่ถึงวันที่จดไมล์ครั้งสุดท้าย
     // — เดิมถ้าเปลี่ยนน้ำมันหลังวันจดไมล์ครั้งสุดท้ายของเดือน (เช่น จดไมล์ 8 ก.ย. เปลี่ยน 10 ก.ย.)
     // จะไม่ถูกนับในเดือนนั้น แล้วไปโผล่เดือนถัดไปแทน
     const monthEnd = mk + '-31';
-    oilLogs.forEach(o=>{ if(o.date <= monthEnd){ baseline = o.km; baselineDate = o.date; } });
+    oilLogs.forEach(o=>{ if(o.date <= monthEnd){ baseline = o.km; baselineDate = o.date; baselineSuspect = o.suspect; } });
     // ถ้าเปลี่ยนน้ำมันหลังเลขไมล์ที่จดไว้ (เลขไมล์ตอนเปลี่ยนมากกว่า) ถือว่าเพิ่งเปลี่ยน = 0
     const sinceOil = Math.max(0, r.km - baseline);
     const remainingKm = interval - sinceOil;
     const status = sinceOil >= interval ? 'overdue' : (remainingKm <= db.settings.warningKm ? 'soon' : 'ok');
 
-    return {label: monthLabelTH(mk), monthKey: mk, endKm: r.km, distance, sinceOil, status, oilChangeDate: baselineDate};
+    return {label: monthLabelTH(mk), monthKey: mk, endKm: r.km, distance, sinceOil, status, oilChangeDate: baselineDate, oilKmSuspect: baselineSuspect};
   });
   return {rows, interval};
 }
@@ -5665,7 +5711,7 @@ function renderVehicleSummaryTable(v){
                 <div class="oil-progress-track"><div class="oil-progress-fill ${r.status}" style="width:${pct}%"></div></div>
                 ${r.status==='overdue' ? `<div class="oil-progress-over">เกินรอบ ${overBy.toLocaleString()} กม.</div>` : ''}
               </td>
-              <td>${formatThaiDateShort(r.oilChangeDate)}</td>
+              <td>${formatThaiDateShort(r.oilChangeDate)}${r.oilKmSuspect ? `<div class="oil-progress-over" title="เลขไมล์ในบันทึกเปลี่ยนน้ำมันครั้งนี้ไม่ตรงกับเลขไมล์รายสัปดาห์ช่วงเดียวกัน">⚠ เลขไมล์ตอนเปลี่ยนน้ำมันน่าจะกรอกผิด</div>` : ''}</td>
               <td><span class="status-pill ${r.status}">${statusLabel[r.status]}</span></td>
               <td>${(i===rows.length-1 && r.status!=='ok') ? `<button class="btn small" onclick="openOilCompleteModal('${v.id}')">✓ เปลี่ยนน้ำมันเครื่องเรียบร้อย</button>` : ''}</td>
             </tr>`;
@@ -6866,7 +6912,9 @@ function getTirePositionStatuses(v){
       }
     }
     const kmUnknown = !!latest && baselineKm==null;
-    const sinceKm = (latest && !kmUnknown) ? Math.max(0, (v.currentKm||0) - baselineKm) : 0;
+    const odoS = odoSeries(v.id);
+    const baseEff = baselineKm==null ? null : odoEffectiveAt(odoS, latest.wearBaselineDate || latest.date, baselineKm);
+    const sinceKm = (latest && !kmUnknown) ? Math.max(0, odoCurrentKm(v) - baseEff) : 0;
     const kmLeft = interval - sinceKm;
     let status = 'never';
     if(latest){

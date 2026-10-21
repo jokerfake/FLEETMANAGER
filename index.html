@@ -3189,6 +3189,7 @@ function daysBetween(a,b){ return Math.round((new Date(b) - new Date(a)) / 86400
    way backfilling an old date won't clobber a newer reading, but adding
    today's/this-week's reading always updates the live dashboard. */
 function logKmReading(vehicleId, date, km, images=[]){
+  date = fixBEYear(date);
   const imgs = (images || []).slice(0, 10);
   const existing = db.kmLogs.find(l=>l.vehicleId===vehicleId && l.date===date);
   const setAt = new Date().toISOString();
@@ -3573,7 +3574,7 @@ function _saveVehicleNow(){
   }
 
   const km = parseInt(document.getElementById('newVehicleKm').value) || 0;
-  const date = document.getElementById('newVehicleDate').value || todayStr();
+  const date = fixBEYear(document.getElementById('newVehicleDate').value) || todayStr();
   const vId = uid();
  db.vehicles.push({id:vId, name, driver, status, fleetGroupId, currentKm:km});
 
@@ -3679,7 +3680,22 @@ function handleImportFile(event){
 // Accepts real .xlsx/.xls files or .csv — flexible on date format (ISO,
 // DD/MM/YYYY, or an actual Excel date cell) and on which column order is used,
 // by matching header text where possible.
+/* วันที่ที่กรอกเป็นปี พ.ศ. (เช่น 2569-09-01) → แปลงเป็น ค.ศ. (2026-09-01) อัตโนมัติ
+   กันปัญหาเดือนแปลกๆ อย่าง "กุมภาพันธ์ 3112" ในกราฟ */
+function fixBEYear(d){
+  if(!d || typeof d !== 'string') return d;
+  const m = d.match(/^(\d{4})(-\d{2}-\d{2})$/);
+  if(!m) return d;
+  const y = parseInt(m[1]);
+  if(y >= 2400 && y <= 2700) return (y - 543) + m[2];
+  return d;
+}
+function isSaneDate(d){ return typeof d === 'string' && d >= '2000-01-01' && d <= '2100-12-31'; }
+
 function parseDateCell(val){
+  return fixBEYear(_parseDateCellRaw(val));
+}
+function _parseDateCellRaw(val){
   if(val instanceof Date && !isNaN(val)){
     return `${val.getFullYear()}-${String(val.getMonth()+1).padStart(2,'0')}-${String(val.getDate()).padStart(2,'0')}`;
   }
@@ -4016,7 +4032,7 @@ async function handleVehiclePhotoUpload(event, vehicleId){
 
 async function submitLogModal(){
   const vehicleId = document.getElementById('logVehicle').value;
-  const date = document.getElementById('logDate').value;
+  const date = fixBEYear(document.getElementById('logDate').value);
   const km = parseInt(document.getElementById('logKm').value);
   if(!vehicleId || !date || isNaN(km)){ alert('กรุณากรอกข้อมูลให้ครบ'); return; }
 
@@ -4388,7 +4404,7 @@ function lastInspectionLabel(vehicleId){
    ถ้าเคยกรอกเลขรวมเกินล้านไว้แล้ว (เช่น 1,002,596) ก็ใช้ได้ ไม่บวกซ้ำ */
 const ODO_WRAP = 1000000;
 function odoSeries(vehicleId){
-  const readings = db.kmLogs.filter(l=>l.vehicleId===vehicleId && l.km!=null && l.date)
+  const readings = db.kmLogs.filter(l=>l.vehicleId===vehicleId && l.km!=null && isSaneDate(l.date))
     .slice().sort((a,b)=> a.date.localeCompare(b.date));
   let prev = null;
   return readings.map(r=>{
@@ -4600,7 +4616,7 @@ function ensureChartSelectionInitialized(){
 // vehicle — used to bound the prev/next month navigation.
 function getAllChartMonthKeys(){
   const keys = new Set();
-  db.kmLogs.forEach(l=> keys.add(monthKey(l.date)));
+  db.kmLogs.forEach(l=>{ if(isSaneDate(l.date)) keys.add(monthKey(l.date)); });
   return Array.from(keys).sort();
 }
 
@@ -4903,7 +4919,7 @@ function saveChecklistLog(){
   const items = {...checklistState};
   const failCount = Object.values(items).filter(x=>x==='fail').length;
   const notes = checklistNotes.trim();
-  const date = checklistDate || todayStr();
+  const date = fixBEYear(checklistDate) || todayStr();
   const photos = checklistPhotos.slice();
   const round = checklistRound || defaultChecklistRound();
   const kmRaw = document.getElementById('chkKm') ? document.getElementById('chkKm').value : '';
@@ -5434,7 +5450,7 @@ async function submitMaintenanceLogModal(){
     ? (db.maintenanceLogs.find(l=>l.id===maintLogEditId) || {}).vehicleId
     : maintLogTargetVehicleId;
   const title = document.getElementById('maintLogTitle').value.trim();
-  const date = document.getElementById('maintLogDate').value;
+  const date = fixBEYear(document.getElementById('maintLogDate').value);
   const kmRaw = document.getElementById('maintLogKm').value;
   const km = kmRaw === '' ? null : parseInt(kmRaw);
   const costRaw = document.getElementById('maintLogCost').value;
@@ -6319,7 +6335,7 @@ function openShipmentModal(shipmentId=null, vehicleIdHint=null){
 
 function saveShipment(){
   const shipmentNo = document.getElementById('shipmentNo').value.trim();
-  const date = document.getElementById('shipmentDate').value;
+  const date = fixBEYear(document.getElementById('shipmentDate').value);
   const vehicleId = document.getElementById('shipmentVehicle').value;
   const origin = shipmentOrigin;
   const originDistrict = shipmentOriginDistrict.trim ? shipmentOriginDistrict.trim() : shipmentOriginDistrict;
@@ -7074,7 +7090,7 @@ function syncTireLogCountFromPositions(){
 
 async function submitTireLogModal(){
   const vehicleId = document.getElementById('tireLogVehicle').value;
-  const date = document.getElementById('tireLogDate').value;
+  const date = fixBEYear(document.getElementById('tireLogDate').value);
   const kmRaw = document.getElementById('tireLogKm').value;
   const km = kmRaw === '' ? null : parseInt(kmRaw);
   const countRaw = document.getElementById('tireLogCount').value;

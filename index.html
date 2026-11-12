@@ -914,7 +914,13 @@
   .rp-sign .line{ border-bottom:1px solid #111; height:44px; }
   .rp-sign .who{ font-size:12px; margin-top:4px; }
   .rp-foot{ margin-top:14px; font-size:10.5px; color:#666; border-top:1px dashed #bbb; padding-top:6px; }
-  @media (max-width:700px){ .rp-top{ flex-direction:column; } .rp-carphoto{ width:100%; } .rp-photos{ grid-template-columns:repeat(2,1fr); } #reportOverlay .rp-page{ padding:16px; } }
+  .rp-table th{ background:#EEF2F7; text-align:left; padding:4px 6px; font-size:12px; border-bottom:1px solid #999; }
+  .rp-stage{ position:fixed; left:-12000px; top:0; width:794px; pointer-events:none; }
+  .rp-stage .rp-page{ background:#fff; color:#111; width:794px; margin:0; padding:28px 32px; border-radius:0; box-sizing:border-box;
+    font-family:'Sarabun',sans-serif; font-size:13px; line-height:1.5; }
+  .rp-stage .rp-photos{ grid-template-columns:repeat(3,1fr); }
+  #fpProgress{ width:100%; height:10px; margin-top:8px; }
+  @media (max-width:700px){ #reportOverlay .rp-top{ flex-direction:column; } #reportOverlay .rp-carphoto{ width:100%; } #reportOverlay .rp-photos{ grid-template-columns:repeat(2,1fr); } #reportOverlay .rp-page{ padding:16px; } }
   @media print{
     body.report-open > *:not(#reportOverlay){ display:none !important; }
     #reportOverlay{ position:static; background:none; padding:0; overflow:visible; }
@@ -1658,6 +1664,28 @@
 </div>
 
 <!-- Activity log (admin only) -->
+<div class="overlay" id="fleetPdfOverlay">
+  <div class="modal" style="max-width:520px;">
+    <h3>ส่งออก PDF ทั้ง fleet</h3>
+    <div class="hint" style="margin-bottom:10px;">สร้าง PDF 1 ไฟล์ต่อรถ 1 คัน (หน้าสรุป + ใบตรวจทุกครั้งของเดือนที่เลือก พร้อมรูปและชื่อผู้ตรวจ) แยกโฟลเดอร์ตามทะเบียน</div>
+    <label style="display:block; font-size:13px; margin:8px 0 4px;">เดือน</label>
+    <input type="month" id="fpMonth" onchange="updateFleetPdfInfo()" style="width:100%; padding:9px 12px; border:1px solid var(--steel); border-radius:8px; background:var(--panel-2); color:var(--paper);">
+    <label style="display:block; font-size:13px; margin:10px 0 4px;">กลุ่มรถ</label>
+    <select id="fpScope" onchange="updateFleetPdfInfo()" style="width:100%;"></select>
+    <label style="display:flex; gap:8px; align-items:center; font-size:13px; margin-top:10px;">
+      <input type="checkbox" id="fpIncludeEmpty"> ออกไฟล์ให้รถที่ไม่มีบันทึกตรวจในเดือนนี้ด้วย (ขึ้นว่า "ไม่มีบันทึกตรวจ")
+    </label>
+    <div class="hint" id="fpInfo" style="margin-top:10px;"></div>
+    <progress id="fpProgress" value="0" max="1" style="display:none;"></progress>
+    <div class="hint" id="fpStatus" style="margin-top:8px; min-height:18px;"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="fpCloseBtn" onclick="closeFleetPdfExport()">ปิด</button>
+      <button class="btn" id="fpBtnFolder" onclick="runFleetPdfExport('folder')">📁 เลือกโฟลเดอร์แล้วบันทึก</button>
+      <button class="btn" id="fpBtnZip" onclick="runFleetPdfExport('zip')">🗜️ ดาวน์โหลดเป็น ZIP</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="activityLogOverlay">
   <div class="modal" style="max-width:560px;">
     <h3>บันทึกกิจกรรมการใช้งาน</h3>
@@ -5744,6 +5772,288 @@ async function printInspectionReport(){
   doPrint();
 }
 
+/* ---------------- ส่งออก PDF ทั้ง fleet ----------------
+   1 ไฟล์ต่อรถ 1 คัน (หน้าสรุป + ใบตรวจทุกครั้งของเดือนที่เลือก) แยกโฟลเดอร์ตามทะเบียน
+   - Chrome/Edge/Opera บนคอม: เลือกโฟลเดอร์แล้วเขียนไฟล์ลงเครื่องตรงๆ (File System Access API)
+   - ทุกเบราว์เซอร์: ดาวน์โหลดเป็น ZIP ที่มีโฟลเดอร์ตามทะเบียนอยู่ข้างใน
+   PDF สร้างจากภาพของใบตรวจ (html2canvas + jsPDF) เพราะ jsPDF เขียนข้อความไทยตรงๆ แล้วสระ/วรรณยุกต์เพี้ยน
+   ไลบรารีโหลดจาก cdnjs ตอนกดส่งออกครั้งแรกเท่านั้น */
+const PDF_LIBS = {
+  html2canvas: 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+  jspdf:       'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+  jszip:       'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
+};
+const PDF_PAGE_PX = 1060; // ความสูงเนื้อหาต่อหน้า A4 (หน่วย px ของ stage กว้าง 794px) — เผื่อขอบบน/ล่างหน้าละ 8 มม.
+const _scriptPromises = {};
+let fleetPdfRunning = false;
+let fleetPdfCancel = false;
+
+function loadScriptOnce(url){
+  if(_scriptPromises[url]) return _scriptPromises[url];
+  _scriptPromises[url] = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = url; s.onload = resolve;
+    s.onerror = ()=>{ delete _scriptPromises[url]; reject(new Error('โหลดไลบรารีไม่สำเร็จ (ตรวจสอบอินเทอร์เน็ต): ' + url)); };
+    document.head.appendChild(s);
+  });
+  return _scriptPromises[url];
+}
+async function ensurePdfLibs(needZip){
+  await Promise.all([loadScriptOnce(PDF_LIBS.html2canvas), loadScriptOnce(PDF_LIBS.jspdf)].concat(needZip ? [loadScriptOnce(PDF_LIBS.jszip)] : []));
+  if(!window.html2canvas || !window.jspdf) throw new Error('ไลบรารีสร้าง PDF ไม่พร้อมใช้งาน');
+  if(needZip && !window.JSZip) throw new Error('ไลบรารี ZIP ไม่พร้อมใช้งาน');
+}
+
+function waitImages(root, ms=10000){
+  const pending = Array.from(root.querySelectorAll('img')).filter(i=>!i.complete);
+  if(!pending.length) return Promise.resolve();
+  return Promise.race([
+    Promise.all(pending.map(i=> new Promise(r=>{ i.onload = i.onerror = r; }))),
+    new Promise(r=> setTimeout(r, ms))
+  ]);
+}
+
+// ชื่อไฟล์/โฟลเดอร์ที่ปลอดภัยบน Windows
+function safeFileName(s){
+  const out = String(s||'').replace(/[\\/:*?"<>|\u0000-\u001f]/g,'-').replace(/\s+/g,' ').trim().replace(/[. ]+$/,'');
+  return out || 'รถ';
+}
+function downloadBlobFile(blob, name){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+}
+
+function fleetPdfVehicles(){
+  const scope = document.getElementById('fpScope').value;
+  return db.vehicles.filter(v=> scope==='all' ? true : scope==='none' ? !v.fleetGroupId : v.fleetGroupId===scope);
+}
+function fleetPdfLogsFor(v, mk){
+  return db.logs.filter(l=>l.vehicleId===v.id && l.date && l.date.slice(0,7)===mk)
+    .sort((a,b)=> a.date.localeCompare(b.date) || String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+}
+
+function openFleetPdfExport(){
+  const months = db.logs.map(l=>l.date && l.date.slice(0,7)).filter(Boolean).sort();
+  document.getElementById('fpMonth').value = months.length ? months[months.length-1] : todayStr().slice(0,7);
+  document.getElementById('fpScope').innerHTML = '<option value="all">ทั้ง fleet (ทุกคัน)</option>'
+    + db.fleetGroups.map(g=>`<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('')
+    + (db.vehicles.some(v=>!v.fleetGroupId) && db.fleetGroups.length ? '<option value="none">ไม่ระบุกลุ่ม</option>' : '');
+  document.getElementById('fpBtnFolder').style.display = (typeof window.showDirectoryPicker === 'function') ? '' : 'none';
+  document.getElementById('fpProgress').style.display = 'none';
+  document.getElementById('fpStatus').textContent = '';
+  document.getElementById('fpCloseBtn').textContent = 'ปิด';
+  updateFleetPdfInfo();
+  document.getElementById('fleetPdfOverlay').classList.add('show');
+}
+function updateFleetPdfInfo(){
+  if(fleetPdfRunning) return;
+  const mk = document.getElementById('fpMonth').value;
+  const vs = fleetPdfVehicles();
+  const withLogs = /^\d{4}-\d{2}$/.test(mk) ? vs.filter(v=>fleetPdfLogsFor(v, mk).length).length : 0;
+  document.getElementById('fpInfo').textContent = `เดือนนี้มีบันทึกตรวจสภาพ ${withLogs} คัน จากทั้งหมด ${vs.length} คัน`;
+}
+function closeFleetPdfExport(){
+  if(fleetPdfRunning){ fleetPdfCancel = true; document.getElementById('fpStatus').textContent = 'กำลังยกเลิก… (จะหยุดหลังคันที่กำลังสร้างอยู่เสร็จ)'; return; }
+  closeModal('fleetPdfOverlay');
+}
+
+/* หน้าสรุปประจำเดือนของรถหนึ่งคัน (หน้าแรกของ PDF) */
+function buildMonthlyCoverHtml(v, mk, logs){
+  const e = escapeHtml;
+  const totalFail = logs.reduce((n,l)=> n + (l.failCount||0), 0);
+  const lastKm = logs.length ? logs[logs.length-1].currentKm : null;
+  const printedAt = new Date().toLocaleString('th-TH',{dateStyle:'long',timeStyle:'short'});
+  const badge = !logs.length ? '<div class="rp-badge fail">ไม่มีบันทึกตรวจ</div>'
+    : `<div class="rp-badge ${totalFail>0?'fail':'ok'}">${totalFail>0 ? `ไม่ผ่านรวม ${totalFail} รายการ` : 'ผ่านทั้งหมด'}</div>`;
+  const cells = [
+    ['ทะเบียน / ชื่อรถ', e(v.name)],
+    ['คนขับ', v.driver ? e(v.driver) : '—'],
+    ['เดือน', e(monthLabelTH(mk))],
+    ['กลุ่มรถ', v.fleetGroupId ? e(vpGroupName(v.fleetGroupId)) : '—'],
+    ['จำนวนครั้งที่ตรวจ', String(logs.length)],
+    ['เลขไมล์ล่าสุดที่ตรวจ', lastKm!=null ? Number(lastKm).toLocaleString('th-TH') + ' กม.' : '—'],
+  ].map(([k,val])=>`<div><div class="k">${k}</div><div class="v">${val}</div></div>`).join('');
+  const photo = v.photoUrl ? `<div class="rp-carphoto"><img src="${e(v.photoUrl)}" alt=""><div class="cap">รูปรถ</div></div>` : '';
+  let table;
+  if(logs.length){
+    const rows = logs.map(l=>{
+      const ins = inspectorInfo(l, v);
+      const who = ins.name ? e(ins.name) + (ins.inferred ? ' *' : '') : '<span class="rp-na">ไม่ระบุ</span>';
+      const res = (l.failCount||0)>0 ? `<span class="rp-failx">✕ ไม่ผ่าน ${l.failCount}</span>` : '<span class="rp-pass">✓ ผ่านทั้งหมด</span>';
+      return `<tr><td>${inspectionRoundOf(l)}</td><td>${e(formatThaiDateLong(l.date))}</td><td>${who}</td><td>${l.currentKm!=null ? Number(l.currentKm).toLocaleString('th-TH') : '—'}</td><td>${res}</td></tr>`;
+    }).join('');
+    const star = logs.some(l=>!l.inspectedBy && inspectorInfo(l, v).inferred) ? '<div class="rp-foot" style="border:none;margin-top:4px;">* อ้างอิงจากบันทึกกิจกรรม (รายการเก่าก่อนมีระบบบันทึกผู้ตรวจ)</div>' : '';
+    table = `<div class="rp-h">สรุปการตรวจสภาพในเดือนนี้</div>
+      <table class="rp-table rp-sumtable"><tr><th>ครั้งที่</th><th>วันที่ตรวจ</th><th>ผู้ตรวจ</th><th>เลขไมล์ (กม.)</th><th>ผล</th></tr>${rows}</table>${star}
+      <div class="rp-foot">รายละเอียดผลตรวจรายข้อและรูปถ่ายของแต่ละครั้ง อยู่ในหน้าถัดไป</div>`;
+  }else{
+    table = '<div class="rp-h">สรุปการตรวจสภาพในเดือนนี้</div><div class="rp-notes">ไม่มีบันทึกตรวจสภาพของรถคันนี้ในเดือนที่เลือก</div>';
+  }
+  return `
+    <div class="rp-head">
+      <div><div class="rp-title">รายงานตรวจสภาพรถประจำเดือน</div><div class="rp-sub">แผนบำรุงรักษารถบรรทุก</div></div>
+      ${badge}
+    </div>
+    <div class="rp-top"><div class="rp-info">${cells}</div>${photo}</div>
+    ${table}
+    <div class="rp-foot">พิมพ์เมื่อ ${e(printedAt)} โดย ${e(currentUser ? currentUser.username : '-')}</div>`;
+}
+
+/* หาตำแหน่งตัดหน้า (px) ให้ไม่ตัดกลางหมวด/แถวรูป */
+function computePdfBreaks(page){
+  const top0 = page.getBoundingClientRect().top;
+  const rel = el => Math.round(el.getBoundingClientRect().top - top0);
+  const total = Math.ceil(page.scrollHeight);
+  const soft = new Set();
+  page.querySelectorAll('.rp-group, .rp-h, .rp-sign').forEach(el=> soft.add(rel(el)));
+  page.querySelectorAll('.rp-photos').forEach(box=>{
+    const tops = Array.from(new Set(Array.from(box.querySelectorAll('img')).map(rel))).sort((a,b)=>a-b);
+    tops.slice(1).forEach(t=> soft.add(t)); // แถวรูปแรกต้องอยู่กับหัวข้อ
+  });
+  const cands = Array.from(soft).sort((a,b)=>a-b);
+  const breaks = [];
+  let start = 0;
+  while(start < total - 1){
+    if(total - start <= PDF_PAGE_PX){ breaks.push([start, total]); break; }
+    const end = start + PDF_PAGE_PX;
+    const ok = cands.filter(t=> t > start + PDF_PAGE_PX*0.3 && t <= end);
+    const cut = ok.length ? ok[ok.length-1] : end;
+    breaks.push([start, cut]);
+    start = cut;
+  }
+  return breaks;
+}
+
+/* สร้าง PDF ของรถหนึ่งคัน: หน้าสรุป + ใบตรวจทุกครั้ง (แต่ละครั้งขึ้นหน้าใหม่) */
+async function buildMonthlyPdfBlob(v, mk, logs, stage){
+  const parts = [buildMonthlyCoverHtml(v, mk, logs)].concat(logs.map(l=>buildInspectionReportHtml(l)));
+  const pages = [];
+  for(const html of parts){
+    stage.innerHTML = `<div class="rp-page">${html.replace(/<img /g, '<img crossorigin="anonymous" ')}</div>`;
+    const page = stage.firstElementChild;
+    await waitImages(page);
+    const canvas = await window.html2canvas(page, {scale:2, useCORS:true, backgroundColor:'#ffffff', logging:false});
+    const k = canvas.width / page.offsetWidth;
+    const mmPerPx = 210 / page.offsetWidth;
+    for(const [s, e] of computePdfBreaks(page)){
+      const sy = Math.round(s*k);
+      const h = Math.min(canvas.height - sy, Math.round((e - s)*k));
+      if(h <= 0) continue;
+      const c = document.createElement('canvas');
+      c.width = canvas.width; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, h);
+      ctx.drawImage(canvas, 0, sy, canvas.width, h, 0, 0, canvas.width, h);
+      pages.push({data: c.toDataURL('image/jpeg', 0.85), hMm: (h / k) * mmPerPx});
+    }
+    canvas.width = canvas.height = 0;
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({unit:'mm', format:'a4', orientation:'portrait', compress:true});
+  pages.forEach((p, i)=>{
+    if(i) doc.addPage();
+    doc.addImage(p.data, 'JPEG', 0, 8, 210, p.hMm);
+    doc.setFontSize(8); doc.setTextColor(120);
+    doc.text(`${i+1} / ${pages.length}`, 105, 293, {align:'center'});
+  });
+  return doc.output('blob');
+}
+
+async function runFleetPdfExport(mode){
+  if(fleetPdfRunning) return;
+  const mk = document.getElementById('fpMonth').value;
+  if(!/^\d{4}-\d{2}$/.test(mk)){ alert('กรุณาเลือกเดือน'); return; }
+  const vehicles = fleetPdfVehicles();
+  if(!vehicles.length){ alert('ไม่มีรถในกลุ่มที่เลือก'); return; }
+  const includeEmpty = document.getElementById('fpIncludeEmpty').checked;
+
+  // ต้องเรียกตัวเลือกโฟลเดอร์ทันทีหลังการกดปุ่ม (ก่อน await อื่น) ไม่งั้นเบราว์เซอร์ไม่ยอมให้เปิด
+  let dirHandle = null;
+  if(mode === 'folder'){
+    try{ dirHandle = await window.showDirectoryPicker({mode:'readwrite'}); }
+    catch(err){ if(err && err.name === 'AbortError') return; alert('เลือกโฟลเดอร์ไม่สำเร็จ: ' + (err && err.message || err)); return; }
+  }
+
+  const statusEl = document.getElementById('fpStatus');
+  const progEl = document.getElementById('fpProgress');
+  const btns = ['fpBtnFolder','fpBtnZip'].map(id=>document.getElementById(id));
+  fleetPdfRunning = true; fleetPdfCancel = false;
+  btns.forEach(b=> b.disabled = true);
+  document.getElementById('fpCloseBtn').textContent = 'ยกเลิก';
+  progEl.style.display = ''; progEl.max = vehicles.length; progEl.value = 0;
+
+  const stage = document.createElement('div');
+  stage.className = 'rp-stage';
+  document.body.appendChild(stage);
+
+  const made = [], skipped = [], failed = [];
+  const usedNames = new Set();
+  const rootName = safeFileName(`ใบตรวจสภาพรถ_${mk}`);
+  let zip = null, rootDir = null;
+  try{
+    statusEl.textContent = 'กำลังโหลดไลบรารีสร้าง PDF…';
+    await ensurePdfLibs(mode === 'zip');
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    if(mode === 'zip') zip = new window.JSZip();
+    else rootDir = await dirHandle.getDirectoryHandle(rootName, {create:true});
+
+    for(let i=0; i<vehicles.length; i++){
+      if(fleetPdfCancel) break;
+      const v = vehicles[i];
+      progEl.value = i;
+      const logs = fleetPdfLogsFor(v, mk);
+      if(!logs.length && !includeEmpty){ skipped.push(v.name); continue; }
+      statusEl.textContent = `กำลังสร้าง ${i+1}/${vehicles.length}: ${v.name}`;
+      try{
+        const blob = await buildMonthlyPdfBlob(v, mk, logs, stage);
+        let folder = safeFileName(v.name), n = 2;
+        while(usedNames.has(folder.toLowerCase())) folder = safeFileName(v.name) + ' (' + (n++) + ')';
+        usedNames.add(folder.toLowerCase());
+        const fileName = `${folder}_ตรวจสภาพ_${mk}.pdf`;
+        if(zip){
+          zip.folder(folder).file(fileName, blob);
+        }else{
+          const vdir = await rootDir.getDirectoryHandle(folder, {create:true});
+          const fh = await vdir.getFileHandle(fileName, {create:true});
+          const w = await fh.createWritable();
+          await w.write(blob); await w.close();
+        }
+        made.push(v.name);
+      }catch(err){
+        console.error('ส่งออก PDF ไม่สำเร็จ', v.name, err);
+        failed.push(`${v.name} (${err && err.message ? err.message : err})`);
+      }
+      await new Promise(r=> setTimeout(r, 0));
+    }
+    progEl.value = vehicles.length;
+
+    if(zip && made.length){
+      statusEl.textContent = 'กำลังรวมไฟล์ ZIP…';
+      const zipBlob = await zip.generateAsync({type:'blob', compression:'STORE'});
+      downloadBlobFile(zipBlob, rootName + '.zip');
+    }
+    logActivity('ส่งออก PDF ทั้ง fleet', `${mk} — ${made.length} คัน${mode==='zip' ? ' (ZIP)' : ' (โฟลเดอร์)'}`);
+    saveDB();
+
+    const lines = [];
+    lines.push(`${fleetPdfCancel ? 'ยกเลิกกลางคัน — ' : 'เสร็จแล้ว — '}สร้าง PDF ${made.length} ไฟล์` + (mode==='zip' ? ` (ดาวน์โหลด ${rootName}.zip)` : ` ในโฟลเดอร์ "${rootName}"`));
+    if(skipped.length) lines.push(`ข้าม ${skipped.length} คันที่ไม่มีบันทึกตรวจเดือนนี้: ${skipped.join(', ')}`);
+    if(failed.length) lines.push(`สร้างไม่สำเร็จ ${failed.length} คัน: ${failed.join('; ')}`);
+    statusEl.innerHTML = lines.map(l=>escapeHtml(l)).join('<br>');
+  }catch(err){
+    console.error('ส่งออก PDF ล้มเหลว', err);
+    statusEl.textContent = 'ส่งออกไม่สำเร็จ: ' + (err && err.message ? err.message : err);
+  }finally{
+    stage.remove();
+    fleetPdfRunning = false; fleetPdfCancel = false;
+    btns.forEach(b=> b.disabled = false);
+    document.getElementById('fpCloseBtn').textContent = 'ปิด';
+  }
+}
+
+
 function renderSummaryView(){
   const app = document.getElementById('app');
   if(!db.vehicles.length){
@@ -5802,6 +6112,7 @@ function renderSummaryView(){
       <div style="color:var(--muted); font-size:13px; margin-top:2px;">วันที่พิมพ์: ${printDate}</div>
     </div>
     <div class="no-print">${fleetTabsHtml}</div>
+    <div class="no-print" style="display:flex; justify-content:flex-end; margin-top:12px;"><button class="btn small" onclick="openFleetPdfExport()">📁 ส่งออก PDF ทั้ง fleet</button></div>
     <div class="panel-block chart-panel" style="margin-top:20px;">
       <h2>ระยะทางรายเดือน — คันไหนวิ่งงานเยอะที่สุด</h2>
       <div class="hint">วงกลมที่ใหญ่ที่สุด คือรถที่วิ่งมากที่สุด<strong>ในเดือนที่เลือก</strong> — เลื่อนดูย้อนหลังแต่ละเดือนได้ด้านล่าง</div>

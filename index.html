@@ -879,6 +879,48 @@
     .no-print{ display:none !important; }
     a{ color:inherit; text-decoration:none; }
   }
+
+  /* ---------------- ใบตรวจสภาพรถ (preview + print/PDF) ---------------- */
+  #reportOverlay{ position:fixed; inset:0; z-index:300; background:rgba(15,23,42,.65); overflow:auto; padding:18px; }
+  #reportOverlay .rp-toolbar{ max-width:794px; margin:0 auto 12px; display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; }
+  #reportOverlay .rp-page{ background:#fff; color:#111; max-width:794px; margin:0 auto; padding:28px 32px; border-radius:8px;
+    font-family:'Sarabun',sans-serif; font-size:13px; line-height:1.5; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .rp-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; border-bottom:2px solid #111; padding-bottom:10px; margin-bottom:12px; }
+  .rp-title{ font-family:'Kanit',sans-serif; font-size:22px; font-weight:700; }
+  .rp-sub{ color:#555; font-size:12px; }
+  .rp-badge{ font-family:'Kanit',sans-serif; font-weight:700; padding:6px 14px; border-radius:999px; font-size:14px; white-space:nowrap; }
+  .rp-badge.ok{ background:#E9F8EE; color:#15803D; border:1px solid #86D1A0; }
+  .rp-badge.fail{ background:#FDECEC; color:#B91C1C; border:1px solid #F1A5A5; }
+  .rp-top{ display:flex; gap:14px; align-items:stretch; margin-bottom:12px; }
+  .rp-info{ flex:1; display:grid; grid-template-columns:1fr 1fr; gap:6px 14px; align-content:start; }
+  .rp-info .k{ font-size:11px; color:#666; }
+  .rp-info .v{ font-weight:600; font-size:13.5px; word-break:break-word; }
+  .rp-info .full{ grid-column:1 / -1; }
+  .rp-carphoto{ width:200px; flex-shrink:0; }
+  .rp-carphoto img{ width:100%; height:130px; object-fit:cover; border:1px solid #bbb; border-radius:6px; display:block; }
+  .rp-carphoto .cap{ font-size:10.5px; color:#666; text-align:center; margin-top:2px; }
+  .rp-h{ font-family:'Kanit',sans-serif; font-weight:600; font-size:13.5px; margin:12px 0 4px; padding:3px 8px; background:#EEF2F7; border-left:4px solid #2F6FED; }
+  .rp-group{ break-inside:avoid; margin-bottom:6px; }
+  .rp-table{ width:100%; border-collapse:collapse; }
+  .rp-table td{ border-bottom:1px solid #ddd; padding:3px 6px; font-size:12.5px; }
+  .rp-table td.res{ width:92px; text-align:center; font-weight:700; white-space:nowrap; }
+  .rp-table tr.fail td{ background:#FDECEC; }
+  .rp-pass{ color:#15803D; } .rp-failx{ color:#B91C1C; } .rp-na{ color:#888; font-weight:400 !important; }
+  .rp-notes{ border:1px solid #ccc; border-radius:6px; padding:6px 10px; white-space:pre-wrap; }
+  .rp-photos{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .rp-photos img{ width:100%; height:150px; object-fit:cover; border:1px solid #bbb; border-radius:4px; break-inside:avoid; }
+  .rp-sign{ display:flex; gap:24px; margin-top:26px; break-inside:avoid; }
+  .rp-sign > div{ flex:1; text-align:center; }
+  .rp-sign .line{ border-bottom:1px solid #111; height:44px; }
+  .rp-sign .who{ font-size:12px; margin-top:4px; }
+  .rp-foot{ margin-top:14px; font-size:10.5px; color:#666; border-top:1px dashed #bbb; padding-top:6px; }
+  @media (max-width:700px){ .rp-top{ flex-direction:column; } .rp-carphoto{ width:100%; } .rp-photos{ grid-template-columns:repeat(2,1fr); } #reportOverlay .rp-page{ padding:16px; } }
+  @media print{
+    body.report-open > *:not(#reportOverlay){ display:none !important; }
+    #reportOverlay{ position:static; background:none; padding:0; overflow:visible; }
+    #reportOverlay .rp-toolbar{ display:none !important; }
+    #reportOverlay .rp-page{ max-width:none; border-radius:0; padding:0; }
+  }
 </style>
 </head>
 <body>
@@ -4944,6 +4986,8 @@ function saveChecklistLog(){
       log.notes = notes;
       log.photos = photos;
       log.round = round;
+      log.editedBy = currentUser ? currentUser.username : null;
+      log.editedAt = new Date().toISOString();
       if(inspKm!=null) log.currentKm = inspKm; // แก้เฉพาะเลขไมล์ในบันทึกตรวจนี้ ไม่แตะบันทึกไมล์รายสัปดาห์
       // km stays as originally recorded — editing corrects the checklist, not the odometer reading
     }
@@ -4952,6 +4996,8 @@ function saveChecklistLog(){
     db.logs.push({
       id: uid(), vehicleId: currentVehicleId, date,
       currentKm: inspKm!=null ? inspKm : v.currentKm, items, failCount, notes, photos, round,
+      inspectedBy: currentUser ? currentUser.username : null,
+      inspectedById: currentUser ? currentUser.id : null,
       createdAt: new Date().toISOString()
     });
     logKmReading(currentVehicleId, date, inspKm!=null ? inspKm : v.currentKm);
@@ -5564,12 +5610,138 @@ function renderHistoryPanel(){
           ${l.photos.map(p=>`<img src="${p}" style="height:60px;border-radius:4px;border:1px solid var(--steel);cursor:pointer;" onclick="openImageLightbox('${p}')" title="คลิกเพื่อดูขนาดเต็ม">`).join('')}
         </div>` : ''}
         <div style="display:flex; gap:6px; margin-top:10px;">
+          <button class="btn ghost small" onclick="openInspectionReport('${l.id}')">🖨️ พิมพ์ / PDF</button>
           <button class="btn ghost small" onclick="startEditChecklistLog('${l.id}')">แก้ไข</button>
           ${can('deleteRecords') ? `<button class="btn ghost small" onclick="deleteChecklistLog('${l.id}')">ลบ</button>` : ''}
         </div>
       </div>
     </details>
   `).join('');
+}
+
+/* ---------------- ใบตรวจสภาพรถ (พิมพ์ / บันทึกเป็น PDF) ----------------
+   แสดงตัวอย่างใบตรวจของบันทึกนั้นๆ (วันที่ตรวจ, รูปถ่ายรถ, บัญชีผู้ตรวจ, ผลรายข้อ)
+   แล้วกดพิมพ์ → เลือก "บันทึกเป็น PDF" ในหน้าต่างพิมพ์ของเบราว์เซอร์
+   (ใช้วิธีนี้เพราะฟอนต์ไทยแสดงถูกต้องที่สุด) */
+function formatThaiDateLong(dateStr){
+  if(!dateStr) return '—';
+  const [y,m,d] = dateStr.split('-').map(Number);
+  return `${d} ${TH_MONTHS[m-1]} ${y+543}`;
+}
+
+// ผู้ตรวจ: ใช้ค่าที่บันทึกไว้ในรายการ ถ้าเป็นรายการเก่าก่อนมีฟิลด์นี้ จะลองหาจาก "บันทึกกิจกรรม"
+function inspectorInfo(log, v){
+  if(log.inspectedBy) return {name: log.inspectedBy, inferred:false};
+  const round = inspectionRoundOf(log);
+  const hit = (db.activityLog||[]).find(a=>
+    a.action === 'เพิ่มบันทึกตรวจสภาพ' && a.detail &&
+    a.detail.includes(`${v.name} ครั้งที่ ${round}`) && a.detail.includes(`(${log.date})`));
+  if(hit && hit.username) return {name: hit.username, inferred:true};
+  return {name:null, inferred:false};
+}
+
+function buildInspectionReportHtml(log){
+  const v = db.vehicles.find(x=>x.id===log.vehicleId) || {name:'(ไม่พบรถ)'};
+  const e = escapeHtml;
+  const insp = inspectorInfo(log, v);
+  const round = inspectionRoundOf(log);
+  const failCount = log.failCount || 0;
+  const inspectorText = insp.name
+    ? e(insp.name) + (insp.inferred ? ' <span style="font-weight:400;color:#777;font-size:11px;">(อ้างอิงจากบันทึกกิจกรรม)</span>' : '')
+    : '<span style="font-weight:400;color:#777;">ไม่ระบุ (บันทึกก่อนเพิ่มระบบบันทึกผู้ตรวจ)</span>';
+  const groupName = v.fleetGroupId ? vpGroupName(v.fleetGroupId) : '';
+
+  const infoCells = [
+    ['ทะเบียน / ชื่อรถ', e(v.name)],
+    ['คนขับ', v.driver ? e(v.driver) : '—'],
+    ['วันที่ตรวจ', e(formatThaiDateLong(log.date))],
+    ['ตรวจครั้งที่ (ของเดือน)', String(round)],
+    ['เลขไมล์ขณะตรวจ', log.currentKm!=null ? Number(log.currentKm).toLocaleString('th-TH') + ' กม.' : '—'],
+    ['กลุ่มรถ', groupName ? e(groupName) : '—'],
+  ].map(([k,val])=>`<div><div class="k">${k}</div><div class="v">${val}</div></div>`).join('')
+   + `<div class="full"><div class="k">ผู้ตรวจ (บัญชีผู้ใช้ในระบบ)</div><div class="v">${inspectorText}</div></div>`
+   + (log.editedBy ? `<div class="full"><div class="k">แก้ไขล่าสุดโดย</div><div class="v">${e(log.editedBy)}${log.editedAt ? ' · ' + e(new Date(log.editedAt).toLocaleString('th-TH',{dateStyle:'medium',timeStyle:'short'})) : ''}</div></div>` : '');
+
+  const carPhoto = v.photoUrl
+    ? `<div class="rp-carphoto"><img src="${e(v.photoUrl)}" alt=""><div class="cap">รูปรถ</div></div>` : '';
+
+  const groups = PRETRIP_CHECKLIST.map((grp, gi)=>{
+    const rows = grp.items.map((item, ii)=>{
+      const val = log.items ? log.items[`${gi}-${ii}`] : undefined;
+      const cls = val==='fail' ? 'fail' : '';
+      const mark = val==='pass' ? '<span class="rp-pass">✓ ผ่าน</span>'
+                 : val==='fail' ? '<span class="rp-failx">✕ ไม่ผ่าน</span>'
+                 : '<span class="rp-na">— ไม่ได้ตรวจ</span>';
+      return `<tr class="${cls}"><td>${e(item)}</td><td class="res">${mark}</td></tr>`;
+    }).join('');
+    return `<div class="rp-group"><div class="rp-h">${e(grp.group)}</div><table class="rp-table">${rows}</table></div>`;
+  }).join('');
+
+  const notes = log.notes ? `<div class="rp-h">หมายเหตุ</div><div class="rp-notes">${e(log.notes)}</div>` : '';
+
+  const photos = (log.photos||[]).filter(Boolean);
+  const photoBlock = photos.length
+    ? `<div class="rp-h">รูปถ่ายประกอบการตรวจ (${photos.length} รูป)</div><div class="rp-photos">${photos.map(p=>`<img src="${e(p)}" alt="">`).join('')}</div>` : '';
+
+  const daily = (typeof getDailyPhotoEntry === 'function') ? getDailyPhotoEntry(v.id, log.date) : null;
+  const dailyImgs = daily && daily.images ? daily.images.filter(u=>u && !photos.includes(u)) : [];
+  const dailyBlock = dailyImgs.length
+    ? `<div class="rp-h">รูปรถประจำวัน (${e(formatThaiDateShort(log.date))}) (${dailyImgs.length} รูป)</div><div class="rp-photos">${dailyImgs.map(p=>`<img src="${e(p)}" alt="">`).join('')}</div>` : '';
+
+  const printedAt = new Date().toLocaleString('th-TH',{dateStyle:'long',timeStyle:'short'});
+  const printer = currentUser ? currentUser.username : '-';
+
+  return `
+    <div class="rp-head">
+      <div><div class="rp-title">ใบตรวจสภาพรถก่อนใช้งาน</div><div class="rp-sub">แผนบำรุงรักษารถบรรทุก</div></div>
+      <div class="rp-badge ${failCount>0?'fail':'ok'}">${failCount>0 ? `ไม่ผ่าน ${failCount} รายการ` : 'ผ่านทั้งหมด'}</div>
+    </div>
+    <div class="rp-top"><div class="rp-info">${infoCells}</div>${carPhoto}</div>
+    ${groups}
+    ${notes}
+    ${photoBlock}
+    ${dailyBlock}
+    <div class="rp-sign">
+      <div><div class="line"></div><div class="who">ผู้ตรวจ${insp.name ? ' ('+e(insp.name)+')' : ''}</div></div>
+      <div><div class="line"></div><div class="who">ผู้จัดการ / ผู้ตรวจสอบ</div></div>
+    </div>
+    <div class="rp-foot">พิมพ์เมื่อ ${e(printedAt)} โดย ${e(printer)}</div>`;
+}
+
+function openInspectionReport(logId){
+  const log = db.logs.find(l=>l.id===logId);
+  if(!log){ alert('ไม่พบบันทึกการตรวจ'); return; }
+  closeInspectionReport();
+  const ov = document.createElement('div');
+  ov.id = 'reportOverlay';
+  ov.innerHTML = `
+    <div class="rp-toolbar">
+      <button class="btn" onclick="printInspectionReport()">🖨️ พิมพ์ / บันทึกเป็น PDF</button>
+      <button class="btn ghost" onclick="closeInspectionReport()">ปิด</button>
+    </div>
+    <div class="rp-page">${buildInspectionReportHtml(log)}</div>`;
+  document.body.appendChild(ov);
+  document.body.classList.add('report-open');
+}
+
+function closeInspectionReport(){
+  const ov = document.getElementById('reportOverlay');
+  if(ov) ov.remove();
+  document.body.classList.remove('report-open');
+}
+
+async function printInspectionReport(){
+  const ov = document.getElementById('reportOverlay');
+  if(!ov) return;
+  // รอให้รูปโหลดครบก่อนพิมพ์ (สูงสุด 8 วินาที) ไม่งั้นรูปจะหายใน PDF
+  const imgs = Array.from(ov.querySelectorAll('img')).filter(i=>!i.complete);
+  if(imgs.length){
+    await Promise.race([
+      Promise.all(imgs.map(i=> new Promise(r=>{ i.onload = i.onerror = r; }))),
+      new Promise(r=> setTimeout(r, 8000))
+    ]);
+  }
+  doPrint();
 }
 
 function renderSummaryView(){

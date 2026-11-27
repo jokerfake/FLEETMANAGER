@@ -21,6 +21,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;600;700;800&family=Sarabun:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -1580,6 +1581,45 @@
     <div class="modal-actions">
       <button class="btn ghost" onclick="closeModal('shipmentOverlay')">ยกเลิก</button>
       <button class="btn" id="shipmentSubmitBtn" onclick="saveShipment()">บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- Export daily photos (ZIP) modal -->
+<div class="overlay" id="dailyPhotoExportOverlay">
+  <div class="modal" style="max-width:480px;">
+    <h3>📦 ส่งออกรูปรถประจำวัน (ZIP)</h3>
+    <div class="field">
+      <label>เลือกรถ</label>
+      <select id="exportPhotoVehicle" onchange="updateDailyPhotoExportPreview()"></select>
+    </div>
+    <div class="field">
+      <label>ช่วงเวลาที่ต้องการส่งออก</label>
+      <select id="exportPhotoRangeType" onchange="onExportPhotoRangeTypeChange()">
+        <option value="month">รายเดือน</option>
+        <option value="week">รายสัปดาห์ (จันทร์ – อาทิตย์)</option>
+        <option value="all">ทั้งหมด</option>
+      </select>
+    </div>
+    <div class="field" id="exportPhotoMonthWrap">
+      <label>เลือกเดือน</label>
+      <input type="month" id="exportPhotoMonth" onchange="updateDailyPhotoExportPreview()">
+    </div>
+    <div class="field" id="exportPhotoWeekWrap" style="display:none;">
+      <label>เลือกวันที่ในสัปดาห์ที่ต้องการ</label>
+      <input type="date" id="exportPhotoWeekDate" onchange="updateDailyPhotoExportPreview()">
+      <div class="hint" id="exportPhotoWeekRangeText" style="margin-top:5px;"></div>
+    </div>
+    <div class="distance-preview" id="exportPhotoPreview" style="margin-top:6px;"></div>
+    <div id="exportPhotoProgressWrap" style="display:none; margin-top:12px;">
+      <div id="exportPhotoProgressText" style="font-size:13px; color:var(--paper); margin-bottom:6px;">กำลังเตรียมดาวน์โหลด...</div>
+      <div class="oil-progress-track" style="height:10px;">
+        <div class="oil-progress-fill ok" id="exportPhotoProgressBar" style="width:0%; transition:width .15s ease;"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="exportPhotoCancelBtn" onclick="cancelOrCloseDailyPhotoExport()">ปิด</button>
+      <button class="btn" id="exportPhotoStartBtn" onclick="startDailyPhotoExport()">📦 ดาวน์โหลดไฟล์ ZIP</button>
     </div>
   </div>
 </div>
@@ -7384,10 +7424,13 @@ function renderDailyPhotoVehicleBlock(v){
           <strong class="display" style="color:var(--text); font-size:14px;">${escapeHtml(v.name)}</strong>
           — รูปวันที่ ${formatThaiDateShort(dailyPhotoDate)} (${images.length}/10 รูป)
         </label>
-        ${history.length ? `
-          <button class="btn ghost small" onclick="toggleDailyPhotoHistory('${v.id}')">
-            ${expanded ? 'ซ่อนย้อนหลัง ▲' : `ย้อนหลัง (${history.length}) ▼`}
-          </button>` : ''}
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button class="btn ghost small" onclick="openDailyPhotoExportModal('${v.id}')" title="ส่งออกรูปรถคันนี้เป็นไฟล์ ZIP">📦 ส่งออกรูป</button>
+          ${history.length ? `
+            <button class="btn ghost small" onclick="toggleDailyPhotoHistory('${v.id}')">
+              ${expanded ? 'ซ่อนย้อนหลัง ▲' : `ย้อนหลัง (${history.length}) ▼`}
+            </button>` : ''}
+        </div>
       </div>
       <div class="photo-tile-grid" style="margin-top:8px;">
         ${images.map((p,i)=>`
@@ -7437,10 +7480,255 @@ function renderDailyPhotosView(){
       <div class="hint">ถ่ายรูปสภาพรถแต่ละคันเก็บไว้ประจำวัน (ไม่เกิน 10 รูปต่อคันต่อวัน) — รถทุกคันแสดงพร้อมกันด้านล่าง เลือกวันที่ก่อนหน้าดูย้อนหลังได้ต่อคันด้วยปุ่ม "ย้อนหลัง"</div>
       <div class="filter-bar">
         <input type="date" id="dailyPhotoDateInput" value="${dailyPhotoDate}" onchange="onDailyPhotoDateChange()">
+        <button class="btn small" onclick="openDailyPhotoExportModal()">📦 ส่งออกรูปภาพ (ZIP)</button>
       </div>
     </div>
     ${sortVehiclesByHasDailyPhoto(db.vehicles).map(v=>renderDailyPhotoVehicleBlock(v)).join('')}
   `;
+}
+
+/* ---------------- Export daily photos to ZIP (grouped by date / vehicle) ---------------- */
+let dailyPhotoExporting = false;
+let dailyPhotoExportCancelled = false;
+
+function sanitizeZipSegment(name){
+  const cleaned = String(name || 'unknown')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\.+$/, '');
+  return cleaned || 'unknown';
+}
+
+function getWeekBoundsFromDate(dateStr){
+  const base = (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) ? dateStr : todayStr();
+  const [y, m, d] = base.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const day = dt.getDay(); // 0=Sun..6=Sat
+  const diffToMon = day === 0 ? -6 : 1 - day;
+  const mon = new Date(y, m - 1, d + diffToMon);
+  const sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6);
+  const fmt = t => `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+  return { start: fmt(mon), end: fmt(sun) };
+}
+
+function getFilteredDailyPhotoEntries(vehicleId, rangeType, monthVal, weekDateVal){
+  const vehNameMap = new Map((db.vehicles || []).map(v => [v.id, v.name]));
+  let weekBounds = null;
+  if(rangeType === 'week') weekBounds = getWeekBoundsFromDate(weekDateVal);
+  return (db.dailyPhotos || [])
+    .filter(p => {
+      if(!p || !p.date || !Array.isArray(p.images) || !p.images.length) return false;
+      if(vehicleId !== 'all' && p.vehicleId !== vehicleId) return false;
+      if(rangeType === 'month') return monthVal && monthKey(p.date) === monthVal;
+      if(rangeType === 'week') return weekBounds && p.date >= weekBounds.start && p.date <= weekBounds.end;
+      return true;
+    })
+    .sort((a, b) => {
+      const dc = a.date.localeCompare(b.date);
+      if(dc !== 0) return dc;
+      return (vehNameMap.get(a.vehicleId) || a.vehicleId).localeCompare(vehNameMap.get(b.vehicleId) || b.vehicleId, 'th');
+    });
+}
+
+function openDailyPhotoExportModal(vehicleIdHint='all'){
+  const vSel = document.getElementById('exportPhotoVehicle');
+  if(!vSel) return;
+  vSel.innerHTML = `<option value="all">ทุกคัน (${(db.vehicles||[]).length} คัน)</option>`
+    + (db.vehicles || []).map(v => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('');
+  vSel.value = (vehicleIdHint && vehicleIdHint !== 'all' && (db.vehicles||[]).some(v => v.id === vehicleIdHint)) ? vehicleIdHint : 'all';
+
+  const baseDate = dailyPhotoDate || todayStr();
+  document.getElementById('exportPhotoRangeType').value = 'month';
+  document.getElementById('exportPhotoMonth').value = baseDate.slice(0, 7);
+  document.getElementById('exportPhotoWeekDate').value = baseDate;
+
+  const progressWrap = document.getElementById('exportPhotoProgressWrap');
+  if(progressWrap) progressWrap.style.display = 'none';
+  onExportPhotoRangeTypeChange();
+  document.getElementById('dailyPhotoExportOverlay').classList.add('show');
+}
+
+function onExportPhotoRangeTypeChange(){
+  const type = document.getElementById('exportPhotoRangeType').value;
+  document.getElementById('exportPhotoMonthWrap').style.display = type === 'month' ? '' : 'none';
+  document.getElementById('exportPhotoWeekWrap').style.display = type === 'week' ? '' : 'none';
+  updateDailyPhotoExportPreview();
+}
+
+function updateDailyPhotoExportPreview(){
+  const vehicleId = document.getElementById('exportPhotoVehicle').value;
+  const rangeType = document.getElementById('exportPhotoRangeType').value;
+  const monthVal = document.getElementById('exportPhotoMonth').value;
+  const weekDateVal = document.getElementById('exportPhotoWeekDate').value;
+
+  if(rangeType === 'week'){
+    const b = getWeekBoundsFromDate(weekDateVal);
+    document.getElementById('exportPhotoWeekRangeText').textContent =
+      `ช่วงวันที่: จ. ${formatThaiDateShort(b.start)} – อา. ${formatThaiDateShort(b.end)}`;
+  }
+
+  const entries = getFilteredDailyPhotoEntries(vehicleId, rangeType, monthVal, weekDateVal);
+  const totalPhotos = entries.reduce((sum, e) => sum + e.images.length, 0);
+  const dayCount = new Set(entries.map(e => e.date)).size;
+  const vehCount = new Set(entries.map(e => e.vehicleId)).size;
+
+  const preview = document.getElementById('exportPhotoPreview');
+  const startBtn = document.getElementById('exportPhotoStartBtn');
+  if(totalPhotos === 0){
+    preview.innerHTML = 'ไม่พบรูปภาพในช่วงเวลาหรือรถที่เลือก';
+    if(startBtn && !dailyPhotoExporting) startBtn.disabled = true;
+  }else{
+    const sampleDate = entries[0].date;
+    const sampleVeh = sanitizeZipSegment(((db.vehicles||[]).find(v => v.id === entries[0].vehicleId)||{}).name || entries[0].vehicleId);
+    preview.innerHTML =
+      `พบ <span class="num">${totalPhotos.toLocaleString()}</span> รูป จาก <strong>${dayCount}</strong> วัน (<strong>${vehCount}</strong> คัน)`
+      + `<div class="hint" style="margin-top:6px;">โครงสร้างในไฟล์ ZIP: <code>${escapeHtml(sampleDate)}/${escapeHtml(sampleVeh)}/รูปที่ 01.jpg</code></div>`;
+    if(startBtn && !dailyPhotoExporting) startBtn.disabled = false;
+  }
+}
+
+function cancelOrCloseDailyPhotoExport(){
+  if(dailyPhotoExporting){
+    dailyPhotoExportCancelled = true;
+    const txt = document.getElementById('exportPhotoProgressText');
+    if(txt) txt.textContent = 'กำลังยกเลิก...';
+    return;
+  }
+  closeModal('dailyPhotoExportOverlay');
+}
+
+function detectImageExt(url, contentType){
+  const ct = String(contentType || '').toLowerCase();
+  if(ct.includes('png')) return 'png';
+  if(ct.includes('webp')) return 'webp';
+  if(ct.includes('gif')) return 'gif';
+  const m = String(url || '').match(/\.(png|webp|gif|jpeg|jpg)(?:[?#]|$)/i);
+  if(m) return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+  return 'jpg';
+}
+
+async function startDailyPhotoExport(){
+  if(dailyPhotoExporting) return;
+  if(typeof JSZip === 'undefined'){
+    alert('ไม่สามารถโหลดไลบรารีสร้างไฟล์ ZIP ได้ (กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตแล้วลองใหม่)');
+    return;
+  }
+  const vehicleId = document.getElementById('exportPhotoVehicle').value;
+  const rangeType = document.getElementById('exportPhotoRangeType').value;
+  const monthVal = document.getElementById('exportPhotoMonth').value;
+  const weekDateVal = document.getElementById('exportPhotoWeekDate').value;
+
+  const entries = getFilteredDailyPhotoEntries(vehicleId, rangeType, monthVal, weekDateVal);
+  if(!entries.length){ alert('ไม่พบรูปภาพในช่วงเวลาหรือรถที่เลือก'); return; }
+
+  const vehNameMap = new Map((db.vehicles || []).map(v => [v.id, v.name]));
+  const tasks = [];
+  entries.forEach(entry => {
+    const plate = sanitizeZipSegment(vehNameMap.get(entry.vehicleId) || entry.vehicleId);
+    const dateFolder = sanitizeZipSegment(entry.date);
+    entry.images.forEach((url, idx) => {
+      tasks.push({ url, dateFolder, plate, index: idx + 1 });
+    });
+  });
+
+  dailyPhotoExporting = true;
+  dailyPhotoExportCancelled = false;
+  const startBtn = document.getElementById('exportPhotoStartBtn');
+  const cancelBtn = document.getElementById('exportPhotoCancelBtn');
+  const progressWrap = document.getElementById('exportPhotoProgressWrap');
+  const progressText = document.getElementById('exportPhotoProgressText');
+  const progressBar = document.getElementById('exportPhotoProgressBar');
+  const controls = ['exportPhotoVehicle','exportPhotoRangeType','exportPhotoMonth','exportPhotoWeekDate'];
+  controls.forEach(id => { const el = document.getElementById(id); if(el) el.disabled = true; });
+  if(startBtn){ startBtn.disabled = true; startBtn.textContent = 'กำลังส่งออก...'; }
+  if(cancelBtn) cancelBtn.textContent = 'ยกเลิก';
+  if(progressWrap) progressWrap.style.display = 'block';
+  if(progressBar) progressBar.style.width = '0%';
+  if(progressText) progressText.textContent = `กำลังดาวน์โหลดรูปภาพ 0 / ${tasks.length} รูป...`;
+
+  try{
+    const zip = new JSZip();
+    let done = 0;
+    let failed = 0;
+    let cursor = 0;
+    const CONCURRENCY = 5;
+
+    async function worker(){
+      while(cursor < tasks.length){
+        if(dailyPhotoExportCancelled) return;
+        const item = tasks[cursor++];
+        try{
+          const res = await fetch(item.url);
+          if(!res.ok) throw new Error('HTTP ' + res.status);
+          const blob = await res.blob();
+          const ext = detectImageExt(item.url, blob.type);
+          const num = String(item.index).padStart(2, '0');
+          const path = `${item.dateFolder}/${item.plate}/${item.plate}_${item.dateFolder}_${num}.${ext}`;
+          zip.file(path, blob);
+        }catch(err){
+          failed++;
+          console.error('ดาวน์โหลดรูปไม่สำเร็จ:', item.url, err);
+        }
+        done++;
+        const pct = Math.round((done / tasks.length) * 85);
+        if(progressBar) progressBar.style.width = pct + '%';
+        if(progressText) progressText.textContent = `กำลังดาวน์โหลดรูปภาพ ${done} / ${tasks.length} รูป...` + (failed ? ` (ข้าม ${failed} รูป)` : '');
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, () => worker()));
+    if(dailyPhotoExportCancelled){
+      if(progressText) progressText.textContent = 'ยกเลิกการส่งออกแล้ว';
+      return;
+    }
+    if(done - failed === 0){
+      alert('ไม่สามารถดาวน์โหลดรูปภาพได้เลย กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต');
+      return;
+    }
+
+    if(progressText) progressText.textContent = 'กำลังรวมไฟล์ ZIP...';
+    const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }, meta => {
+      const pct = 85 + Math.round((meta.percent / 100) * 15);
+      if(progressBar) progressBar.style.width = pct + '%';
+    });
+
+    if(dailyPhotoExportCancelled) return;
+
+    const vehTag = vehicleId === 'all' ? 'ทุกคัน' : sanitizeZipSegment(vehNameMap.get(vehicleId) || vehicleId);
+    let rangeTag = 'ทั้งหมด';
+    if(rangeType === 'month') rangeTag = `เดือน-${monthVal}`;
+    else if(rangeType === 'week'){
+      const b = getWeekBoundsFromDate(weekDateVal);
+      rangeTag = `สัปดาห์-${b.start}_ถึง_${b.end}`;
+    }
+    const fileName = `รูปรถประจำวัน-${vehTag}-${rangeTag}.zip`;
+
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+    if(progressBar) progressBar.style.width = '100%';
+    if(progressText) progressText.textContent = `ส่งออกสำเร็จ ${done - failed} รูป` + (failed ? ` (โหลดไม่สำเร็จ ${failed} รูป)` : '');
+    if(failed > 0){
+      alert(`ส่งออกไฟล์ ZIP เรียบร้อยแล้ว (${done - failed} รูป)\nมี ${failed} รูปที่โหลดไม่สำเร็จ (อาจถูกลบจากเซิร์ฟเวอร์แล้ว)`);
+    }
+  }catch(err){
+    console.error('สร้างไฟล์ ZIP ไม่สำเร็จ', err);
+    alert('สร้างไฟล์ ZIP ไม่สำเร็จ: ' + (err && err.message ? err.message : err));
+  }finally{
+    dailyPhotoExporting = false;
+    dailyPhotoExportCancelled = false;
+    controls.forEach(id => { const el = document.getElementById(id); if(el) el.disabled = false; });
+    if(startBtn){ startBtn.disabled = false; startBtn.textContent = '📦 ดาวน์โหลดไฟล์ ZIP'; }
+    if(cancelBtn) cancelBtn.textContent = 'ปิด';
+    updateDailyPhotoExportPreview();
+  }
 }
 
 // Vehicles with a photo already uploaded for the selected date float to the
